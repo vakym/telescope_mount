@@ -1,0 +1,36 @@
+# --- ESP-IDF ---
+# Каталог сборки и сгенерированная конфигурация: создаются локально idf.py
+build/
+sdkconfig
+sdkconfig.old
+sdkconfig.rename
+managed_components/
+dependencies.lock
+
+# Артефакты сборки вне build/
+*.bin
+*.elf
+*.map
+*.img
+*.hex
+
+# --- Системные и IDE ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Python (скрипты ESP-IDF, хуки, прошивальщик) ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Инструменты анализа ---
+.compile_commands.json
+compile_commands.json
+.cache/
+.clangd/
