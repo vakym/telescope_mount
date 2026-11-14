@@ -1,0 +1,18 @@
+menu "Application"
+
+    config APP_MOTOR_SELFTEST
+        bool "Run motor self-test at boot"
+        default n
+        help
+            Включает однократный самотест привода сразу после запуска:
+            по два оборота каждой оси, одновременное движение и аварийный
+            останов с замером задержки обесточивания.
+
+            По умолчанию выключен: самотест двигает обе оси, поэтому его
+            следует включать только на стенде.
+
+    config APP_STATUS_PERIOD_MS
+        int "Axis status log period (ms)"
+        default 5000
+
+endmenu

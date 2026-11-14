@@ -167,3 +167,8 @@ flowchart TD
   4-фазное (full-step/half-step), step/dir не применяется.
 - Требуется: установить ESP-IDF, выполнить `export.bat`, затем
   `idf.py set-target esp32` и `idf.py build`.
+- 2026-11-14 — этапы 3–4 закрыты планом
+  [`0002-motor-control.md`](0002-motor-control.md): слой движения
+  (`motion` + `motor_hal`), политика дедлайнов и удержания, host-тесты
+  логики. Компоненты `board`, `motion`, `motor_hal` созданы; GPIO назначены
+  в `board` по подтверждённой карте.

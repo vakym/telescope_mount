@@ -1,6 +1,7 @@
 # --- ESP-IDF ---
 # Каталог сборки и сгенерированная конфигурация: создаются локально idf.py
 build/
+build-host/
 sdkconfig
 sdkconfig.old
 sdkconfig.rename
