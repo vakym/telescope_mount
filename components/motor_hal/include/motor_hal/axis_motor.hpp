@@ -50,11 +50,17 @@ public:
     void clear() override;
 
 private:
+    /// Явный жизненный цикл: таймаут подтверждения оставляет ось в Stopping.
+    enum class Lifecycle : std::uint8_t { Stopped, Running, Stopping };
+
     static void taskEntry(void *arg);
     static bool IRAM_ATTR alarmTrampoline(void *arg);
     void run();
     void lock() const;
     void unlock() const;
+
+    /// Освобождает всё, что успел создать start(); идемпотентен.
+    void cleanupResources();
 
     GptimerStepClock clock_{};
     CoilDriver coil_{};
@@ -63,7 +69,7 @@ private:
     SemaphoreHandle_t mutex_ = nullptr;
     SemaphoreHandle_t exit_sem_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
-    bool running_ = false;
+    Lifecycle lifecycle_ = Lifecycle::Stopped;
 };
 
 }  // namespace motor_hal

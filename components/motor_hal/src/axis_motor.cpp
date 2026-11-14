@@ -18,20 +18,39 @@ namespace {
 constexpr const char *kTag = "axis_motor";
 constexpr std::uint32_t kInfiniteWait = 0xFFFFFFFFU;
 
+/// Перевод микросекунд в тики с округлением вверх и без переполнения.
+TickType_t usToTicksCeil(std::uint32_t wait_us) noexcept
+{
+    constexpr std::uint64_t kUsPerSecond = 1'000'000ULL;
+    const std::uint64_t ticks =
+        (static_cast<std::uint64_t>(wait_us) * configTICK_RATE_HZ + kUsPerSecond - 1ULL) /
+        kUsPerSecond;
+    return static_cast<TickType_t>(ticks == 0ULL ? 1ULL : ticks);
+}
+
 }  // namespace
 
 esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
                            const board::CoilPins &pins,
                            const motion::AxisConfig &config)
 {
-    if (running_) {
+    if (lifecycle_ != Lifecycle::Stopped) {
         return ESP_ERR_INVALID_STATE;
     }
 
-    ESP_RETURN_ON_ERROR(coil_.init(pins, config.pattern, config.invert_direction),
-                        kTag, "coil init failed");
-    ESP_RETURN_ON_ERROR(clock_.init(&AxisMotor::alarmTrampoline, this),
-                        kTag, "step clock init failed");
+    esp_err_t err = coil_.init(pins, config.pattern, config.invert_direction);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "coil init failed");
+        cleanupResources();
+        return err;
+    }
+
+    err = clock_.init(&AxisMotor::alarmTrampoline, this);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "step clock init failed");
+        cleanupResources();
+        return err;
+    }
 
     motion::AxisExecutor::Params params{};
     params.watchdog_us = CONFIG_MOTOR_EVENT_WATCHDOG_US;
@@ -39,13 +58,13 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
     executor_.emplace(planner, clock_, coil_, *this, params);
 
     queue_ = xQueueCreate(CONFIG_MOTOR_CMD_QUEUE_LEN, sizeof(motion::AxisCommand));
-    ESP_RETURN_ON_FALSE(queue_ != nullptr, ESP_ERR_NO_MEM, kTag, "queue create failed");
-
     mutex_ = xSemaphoreCreateMutex();
-    ESP_RETURN_ON_FALSE(mutex_ != nullptr, ESP_ERR_NO_MEM, kTag, "mutex create failed");
-
     exit_sem_ = xSemaphoreCreateBinary();
-    ESP_RETURN_ON_FALSE(exit_sem_ != nullptr, ESP_ERR_NO_MEM, kTag, "exit semaphore create failed");
+    if (queue_ == nullptr || mutex_ == nullptr || exit_sem_ == nullptr) {
+        ESP_LOGE(kTag, "resource allocation failed");
+        cleanupResources();
+        return ESP_ERR_NO_MEM;
+    }
 
     const BaseType_t created = xTaskCreatePinnedToCore(&AxisMotor::taskEntry,
                                                        "motor_axis",
@@ -54,30 +73,50 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
                                                        CONFIG_MOTOR_AXIS_TASK_PRIORITY,
                                                        &task_handle_,
                                                        CONFIG_MOTOR_AXIS_TASK_CORE);
-    ESP_RETURN_ON_FALSE(created == pdPASS, ESP_ERR_NO_MEM, kTag, "task create failed");
+    if (created != pdPASS) {
+        ESP_LOGE(kTag, "task create failed");
+        task_handle_ = nullptr;
+        cleanupResources();
+        return ESP_ERR_NO_MEM;
+    }
 
-    running_ = true;
+    lifecycle_ = Lifecycle::Running;
     return ESP_OK;
 }
 
 esp_err_t AxisMotor::stop()
 {
-    if (!running_) {
+    if (lifecycle_ == Lifecycle::Stopped) {
         return ESP_OK;
     }
-    running_ = false;  // новые команды больше не принимаются
+
+    if (lifecycle_ == Lifecycle::Running) {
+        lifecycle_ = Lifecycle::Stopping;  // новые команды не принимаются
+        if (task_handle_ != nullptr) {
+            // Задача сама обесточит фазы (EmergencyStop), выйдет из цикла по
+            // TaskExit и подтвердит завершение.
+            (void)xTaskNotify(task_handle_, motion::EmergencyStop | motion::TaskExit, eSetBits);
+        }
+    }
 
     if (task_handle_ != nullptr) {
-        // Согласованный shutdown: задача сама обесточит фазы (EmergencyStop),
-        // выйдет из цикла по TaskExit и подтвердит завершение.
-        (void)xTaskNotify(task_handle_, motion::EmergencyStop | motion::TaskExit, eSetBits);
-        if (exit_sem_ != nullptr &&
+        if (exit_sem_ == nullptr ||
             xSemaphoreTake(exit_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            // Задача могла не завершиться: ресурсы освобождать нельзя,
+            // состояние остаётся Stopping, повторный stop() может дождаться.
             ESP_LOGE(kTag, "axis task did not confirm shutdown");
+            return ESP_ERR_TIMEOUT;
         }
         task_handle_ = nullptr;
     }
 
+    cleanupResources();
+    lifecycle_ = Lifecycle::Stopped;
+    return ESP_OK;
+}
+
+void AxisMotor::cleanupResources()
+{
     (void)clock_.deinit();  // ISR больше не может сработать
     coil_.release();        // фазы гарантированно сняты
 
@@ -94,12 +133,11 @@ esp_err_t AxisMotor::stop()
         exit_sem_ = nullptr;
     }
     executor_.reset();
-    return ESP_OK;
 }
 
 bool AxisMotor::post(const motion::AxisCommand &cmd)
 {
-    if (!running_ || queue_ == nullptr || task_handle_ == nullptr) {
+    if (lifecycle_ != Lifecycle::Running || queue_ == nullptr || task_handle_ == nullptr) {
         return false;
     }
     if (xQueueSend(queue_, &cmd, 0) != pdTRUE) {
@@ -111,7 +149,7 @@ bool AxisMotor::post(const motion::AxisCommand &cmd)
 
 bool AxisMotor::emergencyStop()
 {
-    if (!running_ || task_handle_ == nullptr) {
+    if (lifecycle_ != Lifecycle::Running || task_handle_ == nullptr) {
         return false;
     }
     (void)xTaskNotify(task_handle_, motion::EmergencyStop, eSetBits);
@@ -196,11 +234,8 @@ void AxisMotor::run()
         }
         unlock();
 
-        TickType_t ticks = portMAX_DELAY;
-        if (wait_us != kInfiniteWait) {
-            const std::uint32_t wait_ms = (wait_us + 999U) / 1000U;
-            ticks = pdMS_TO_TICKS(std::max<std::uint32_t>(wait_ms, 1U));
-        }
+        const TickType_t ticks =
+            (wait_us == kInfiniteWait) ? portMAX_DELAY : usToTicksCeil(wait_us);
 
         std::uint32_t bits = 0;
         (void)xTaskNotifyWait(0, 0xFFFFFFFFU, &bits, ticks);

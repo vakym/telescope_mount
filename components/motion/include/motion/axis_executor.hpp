@@ -62,6 +62,8 @@ private:
     /// дедлайн исполненного шага для продолжения движения или now для старта.
     void armNext(std::uint64_t anchor_us) noexcept;
     void startHoldOrRelease() noexcept;
+    /// Приводит удержание в соответствие с текущей политикой оси.
+    void syncHoldState() noexcept;
     void checkHoldExpiry(std::uint64_t now) noexcept;
     void publish() noexcept;
 

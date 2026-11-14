@@ -254,6 +254,121 @@ void waitTimeoutDoesNotDeEnergize()
     CHECK(rig.clock.armed);
 }
 
+void waitTimeoutBeforeWatchdogDoesNotReplan()
+{
+    Rig rig(baseConfig());
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::setTargetRate(400.0F));
+    const std::uint64_t planned = rig.clock.deadline;
+
+    // До аппаратного дедлайна истечение ожидания FreeRTOS ничего не значит.
+    rig.clock.now = planned - 100;
+    rig.executor.onWakeup(0U);
+    CHECK(rig.clock.deadline == planned);
+    CHECK(rig.planner.status().late_replans == 0);
+
+    // Между дедлайном и watchdog-порогом расписание тоже не меняется.
+    rig.clock.now = planned + 100;
+    rig.executor.onWakeup(0U);
+    CHECK(rig.clock.deadline == planned);
+    CHECK(rig.planner.status().late_replans == 0);
+    CHECK(rig.planner.status().position_trusted);
+}
+
+void holdPolicyFiniteToInfinite()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 20;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    motion::HoldPolicy infinite{};
+    infinite.hold_enabled = true;
+    infinite.hold_timeout_ms = 0;
+    rig.send(AxisCommand::setHoldPolicy(infinite));
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    const int releases = rig.coil.releases;
+    rig.clock.now += 25000;
+    rig.send(AxisCommand::setTargetRate(std::numeric_limits<float>::quiet_NaN()));
+    CHECK(rig.coil.releases == releases);  // таймер снят, удержание бессрочное
+}
+
+void holdPolicyInfiniteToDisabled()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 0;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    motion::HoldPolicy disabled{};
+    disabled.hold_enabled = false;
+    const int releases = rig.coil.releases;
+    rig.send(AxisCommand::setHoldPolicy(disabled));
+
+    CHECK(rig.coil.releases > releases);
+    CHECK(rig.planner.status().state == AxisState::Released);
+}
+
+void holdPolicyInfiniteToFinite()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 0;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    motion::HoldPolicy finite{};
+    finite.hold_enabled = true;
+    finite.hold_timeout_ms = 20;
+    rig.send(AxisCommand::setHoldPolicy(finite));
+
+    const int releases = rig.coil.releases;
+    rig.clock.now += 25000;
+    rig.executor.onWakeup(0U);
+    CHECK(rig.coil.releases > releases);
+    CHECK(rig.planner.status().state == AxisState::Released);
+}
+
+void energizeStartsFiniteHold()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 20;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    // Обесточиваем и снова подаём фазы: конечный таймаут должен заработать.
+    rig.send(AxisCommand::stop(motion::StopMode::Immediate));
+    CHECK(rig.planner.status().state == AxisState::Released);
+    rig.send(AxisCommand::energize());
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    const int releases = rig.coil.releases;
+    rig.clock.now += 25000;
+    rig.executor.onWakeup(0U);
+    CHECK(rig.coil.releases > releases);
+    CHECK(rig.planner.status().state == AxisState::Released);
+}
+
 void resumeCancelsHoldTimer()
 {
     motion::AxisConfig cfg = baseConfig();
@@ -414,6 +529,11 @@ int main()
     identicalCommandsDoNotDeferStep();
     commandBudgetIsBounded();
     waitTimeoutDoesNotDeEnergize();
+    waitTimeoutBeforeWatchdogDoesNotReplan();
+    holdPolicyFiniteToInfinite();
+    holdPolicyInfiniteToDisabled();
+    holdPolicyInfiniteToFinite();
+    energizeStartsFiniteHold();
     resumeCancelsHoldTimer();
     holdExpiryIsIndependentOfCommands();
     rejectedCommandsDoNotPreventRelease();

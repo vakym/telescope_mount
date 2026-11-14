@@ -431,6 +431,55 @@ void replacementNearTargetRespectsDecel()
     CHECK_GT(max_position, target);  // цель ближе тормозного пути
 }
 
+void decelBoundAcrossConfigs()
+{
+    struct Case {
+        StepPattern pattern;
+        float max_rate;
+        float accel;
+        float decel;
+    };
+
+    const Case cases[] = {
+        {StepPattern::Half8, 400.0F, 400.0F, 400.0F},
+        {StepPattern::Half8, 800.0F, 1600.0F, 800.0F},
+        {StepPattern::Full4Double, 400.0F, 400.0F, 800.0F},
+        {StepPattern::Full4Double, 800.0F, 800.0F, 1600.0F},
+    };
+
+    for (const Case &c : cases) {
+        motion::AxisConfig cfg = baseConfig(c.pattern);
+        cfg.max_rate_steps_s = c.max_rate;
+        cfg.accel_steps_s2 = c.accel;
+        cfg.decel_steps_s2 = c.decel;
+
+        Rig rig(cfg);
+        const float high = c.max_rate * 0.9F;
+        CHECK(rig.planner.apply(AxisCommand::setTargetRate(high)));
+        (void)accelerateTo(rig.planner, high, nullptr, nullptr);
+
+        const float low = c.max_rate * 0.25F;
+        CHECK(rig.planner.apply(AxisCommand::setTargetRate(low)));
+
+        const double ds = static_cast<double>(motion::deltaHalfSteps(c.pattern));
+        float previous = std::fabs(rig.planner.status().rate_steps_s);
+        StepPlan plan{};
+
+        for (int i = 0; i < 20000 && rig.planner.prepareNextStep(plan); ++i) {
+            rig.planner.commitPending();
+            const float current = std::fabs(rig.planner.status().rate_steps_s);
+            const double limit_sq = previous * previous - 2.0 * c.decel * ds;
+            CHECK(static_cast<double>(current) * current >= limit_sq * (1.0 - 1e-4) - 1e-6);
+            previous = current;
+            if (current <= low + 1e-2F) {
+                break;
+            }
+        }
+
+        CHECK_NEAR(previous, low, 0.5 + 0.01 * low);
+    }
+}
+
 void holdPolicyDoesNotReplan()
 {
     Rig rig(baseConfig());
@@ -481,6 +530,7 @@ int main()
     rateDecreaseRespectsDecel();
     negativeRateDecreaseRespectsDecel();
     replacementNearTargetRespectsDecel();
+    decelBoundAcrossConfigs();
     holdPolicyDoesNotReplan();
     moveStepsZeroIsSmoothStop();
     return TEST_RESULT();

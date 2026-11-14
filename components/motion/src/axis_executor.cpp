@@ -60,10 +60,12 @@ void AxisExecutor::onWakeup(std::uint32_t bits) noexcept
     if ((bits & TimerEvent) != 0U) {
         handleTimer();
     } else if (!commands_applied && planner_.hasPending()) {
-        // Пробуждение по таймауту ожидания: событие таймера не доставлено.
-        handleMissed(now, FaultReason::WatchdogTimeout);
-    } else {
-        (void)now;
+        // Истечение ожидания FreeRTOS само по себе не доказывает, что прошёл
+        // аппаратный дедлайн: watchdog проверяется по абсолютному времени.
+        const std::uint64_t watchdog_deadline = pending_deadline_us_ + params_.watchdog_us;
+        if (now >= watchdog_deadline) {
+            handleMissed(now, FaultReason::WatchdogTimeout);
+        }
     }
 
     checkHoldExpiry(now);
@@ -105,12 +107,17 @@ void AxisExecutor::handleCommands() noexcept
         case CommandKind::Release:
         case CommandKind::ResetFault:
             coil_.release();
+            hold_timer_active_ = false;
             break;
         case CommandKind::Energize:
             coil_.energize();
             break;
         default:
             break;
+        }
+
+        if (cmd.kind == CommandKind::SetHoldPolicy || cmd.kind == CommandKind::Energize) {
+            syncHoldState();
         }
         processed += 1U;
     }
@@ -332,6 +339,38 @@ void AxisExecutor::startHoldOrRelease() noexcept
     if (state == AxisState::Released || state == AxisState::Idle) {
         coil_.release();
     }
+}
+
+void AxisExecutor::syncHoldState() noexcept
+{
+    const AxisConfig &cfg = planner_.config();
+    const AxisState state = planner_.status().state;
+
+    if (state == AxisState::Holding) {
+        if (!cfg.hold.hold_enabled) {
+            coil_.release();
+            planner_.forceReleased(ReleaseReason::Explicit);
+            hold_timer_active_ = false;
+            return;
+        }
+        if (!coil_.isEnergized()) {
+            coil_.energize();
+        }
+        if (cfg.hold.hold_timeout_ms == 0U) {
+            hold_timer_active_ = false;  // бессрочное удержание
+        } else {
+            // Политика изменилась: срок отсчитывается от текущего момента
+            // один раз, а не продлевается каждой командой.
+            hold_timer_active_ = true;
+            hold_deadline_us_ =
+                alarm_.nowUs() + static_cast<std::uint64_t>(cfg.hold.hold_timeout_ms) * 1000U;
+        }
+        return;
+    }
+
+    // Стоящая обесточенная ось не начинает удержание по одной лишь смене
+    // политики: фазы подаются только командой Energize или после движения.
+    hold_timer_active_ = false;
 }
 
 void AxisExecutor::checkHoldExpiry(std::uint64_t now) noexcept

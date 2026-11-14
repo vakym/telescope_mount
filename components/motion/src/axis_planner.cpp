@@ -351,10 +351,11 @@ bool AxisPlanner::prepareNextStep(StepPlan &out) noexcept
             const double sq = v_begin * v_begin - 2.0 * decel * static_cast<double>(ds);
             const double v_min = sq > 0.0 ? std::sqrt(sq) : 0.0;
             const double budget_sq = 2.0 * decel * static_cast<double>(remaining);
-            // Относительный допуск компенсирует округление float-скоростей:
-            // иначе на последнем событии разность 0.5 единицы v^2 превращается
-            // в лишний шаг перелёта.
-            const double budget_tolerance = budget_sq * 1e-3 + 1e-9;
+            // Допуск привязан к шагу замедления 2*d*ds, а не ко всему остатку:
+            // он компенсирует округление float-скоростей и не разрешает
+            // снижение скорости круче decel.
+            const double step_budget = 2.0 * decel * static_cast<double>(ds);
+            const double budget_tolerance = step_budget * 1e-3 + 1e-9;
 
             if (v_begin * v_begin <= budget_sq + budget_tolerance) {
                 // Тормозной путь помещается в остаток: следуем cap. Инвариант
