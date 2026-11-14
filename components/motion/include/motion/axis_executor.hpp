@@ -24,6 +24,7 @@ enum EventBits : std::uint32_t {
     TimerEvent = 1U << 0,
     CommandPending = 1U << 1,
     EmergencyStop = 1U << 2,
+    TaskExit = 1U << 3,  ///< используется обвязкой для согласованного shutdown
 };
 
 class AxisExecutor {
@@ -45,6 +46,9 @@ public:
     /// Сколько ждать следующего события; UINT32_MAX — бесконечно.
     std::uint32_t nextWaitUs() const noexcept;
 
+    /// Остались ли команды, не обработанные из-за бюджета.
+    bool hasPendingCommands() const noexcept { return !source_.empty(); }
+
     AxisStatus status() const noexcept;
 
     bool holdsTimer() const noexcept { return hold_timer_active_; }
@@ -54,7 +58,9 @@ private:
     void handleCommands() noexcept;
     void handleTimer() noexcept;
     void handleMissed(std::uint64_t now, FaultReason reason) noexcept;
-    void armNext() noexcept;
+    /// anchor_us — момент, от которого отсчитывается следующее событие:
+    /// дедлайн исполненного шага для продолжения движения или now для старта.
+    void armNext(std::uint64_t anchor_us) noexcept;
     void startHoldOrRelease() noexcept;
     void checkHoldExpiry(std::uint64_t now) noexcept;
     void publish() noexcept;

@@ -104,7 +104,37 @@ void lateWakeupKeepsSchedule()
 
     CHECK(rig.coil.advances == 1);
     CHECK(rig.clock.armed);
-    CHECK(rig.clock.deadline > planned);
+    CHECK(rig.planner.status().late_replans == 0);
+
+    // Абсолютное расписание: следующий срок считается от дедлайна
+    // исполненного события, а не от момента пробуждения.
+    StepPlan next{};
+    CHECK(rig.planner.prepareNextStep(next));
+    CHECK(rig.clock.deadline == planned + next.interval_us);
+}
+
+void scheduleDoesNotDrift()
+{
+    Rig rig(baseConfig());
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::setTargetRate(800.0F));
+
+    std::uint64_t planned = rig.clock.deadline;
+
+    for (int i = 0; i < 200; ++i) {
+        // Каждое пробуждение на 30 мкс позже дедлайна.
+        rig.clock.now = planned + 30;
+        rig.clock.armed = false;
+        rig.executor.onWakeup(motion::TimerEvent);
+
+        StepPlan next{};
+        CHECK(rig.planner.prepareNextStep(next));
+        planned += next.interval_us;
+        if (rig.clock.deadline != planned) {
+            CHECK(rig.clock.deadline == planned);
+            break;
+        }
+    }
     CHECK(rig.planner.status().late_replans == 0);
 }
 
@@ -195,11 +225,14 @@ void commandBudgetIsBounded()
 
     rig.executor.onWakeup(motion::CommandPending);
     CHECK(rig.source.queue.size() == 3);  // бюджет 2 за итерацию
+    CHECK(rig.executor.hasPendingCommands());
 
-    rig.executor.onWakeup(motion::CommandPending);
-    CHECK(rig.source.queue.size() == 1);
-    rig.executor.onWakeup(motion::CommandPending);
+    // Остаток обрабатывается без новых внешних отправок.
+    while (rig.executor.hasPendingCommands()) {
+        rig.executor.onWakeup(motion::CommandPending);
+    }
     CHECK(rig.source.empty());
+    CHECK_NEAR(rig.planner.status().target_rate_steps_s, 400.0, 1e-3);
 }
 
 void waitTimeoutDoesNotDeEnergize()
@@ -219,6 +252,30 @@ void waitTimeoutDoesNotDeEnergize()
     CHECK(rig.planner.status().position_trusted);
     CHECK(rig.planner.status().late_replans >= 1);
     CHECK(rig.clock.armed);
+}
+
+void resumeCancelsHoldTimer()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 20;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    // Возобновление приходит уже после старого hold_deadline.
+    rig.clock.now += 25000;
+    const int releases = rig.coil.releases;
+
+    rig.source.push(AxisCommand::setTargetRate(100.0F));
+    rig.executor.onWakeup(motion::CommandPending);
+
+    CHECK(rig.coil.releases == releases);  // старый таймаут не обесточил ось
+    CHECK(rig.clock.armed);
+    CHECK(rig.coil.advances == 1);
 }
 
 void holdExpiryIsIndependentOfCommands()
@@ -350,12 +407,14 @@ int main()
 {
     commandDoesNotStep();
     lateWakeupKeepsSchedule();
+    scheduleDoesNotDrift();
     cancelledStepAndStaleNotification();
     staleNotificationDoesNotStepNewMotion();
     simultaneousBitsKeepTimerEvent();
     identicalCommandsDoNotDeferStep();
     commandBudgetIsBounded();
     waitTimeoutDoesNotDeEnergize();
+    resumeCancelsHoldTimer();
     holdExpiryIsIndependentOfCommands();
     rejectedCommandsDoNotPreventRelease();
     emergencyStop();

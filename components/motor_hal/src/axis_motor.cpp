@@ -44,6 +44,9 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
     mutex_ = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(mutex_ != nullptr, ESP_ERR_NO_MEM, kTag, "mutex create failed");
 
+    exit_sem_ = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(exit_sem_ != nullptr, ESP_ERR_NO_MEM, kTag, "exit semaphore create failed");
+
     const BaseType_t created = xTaskCreatePinnedToCore(&AxisMotor::taskEntry,
                                                        "motor_axis",
                                                        CONFIG_MOTOR_AXIS_TASK_STACK,
@@ -62,12 +65,22 @@ esp_err_t AxisMotor::stop()
     if (!running_) {
         return ESP_OK;
     }
-    running_ = false;
+    running_ = false;  // новые команды больше не принимаются
+
     if (task_handle_ != nullptr) {
-        vTaskDelete(task_handle_);
+        // Согласованный shutdown: задача сама обесточит фазы (EmergencyStop),
+        // выйдет из цикла по TaskExit и подтвердит завершение.
+        (void)xTaskNotify(task_handle_, motion::EmergencyStop | motion::TaskExit, eSetBits);
+        if (exit_sem_ != nullptr &&
+            xSemaphoreTake(exit_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            ESP_LOGE(kTag, "axis task did not confirm shutdown");
+        }
         task_handle_ = nullptr;
     }
-    (void)clock_.deinit();
+
+    (void)clock_.deinit();  // ISR больше не может сработать
+    coil_.release();        // фазы гарантированно сняты
+
     if (queue_ != nullptr) {
         vQueueDelete(queue_);
         queue_ = nullptr;
@@ -75,6 +88,10 @@ esp_err_t AxisMotor::stop()
     if (mutex_ != nullptr) {
         vSemaphoreDelete(mutex_);
         mutex_ = nullptr;
+    }
+    if (exit_sem_ != nullptr) {
+        vSemaphoreDelete(exit_sem_);
+        exit_sem_ = nullptr;
     }
     executor_.reset();
     return ESP_OK;
@@ -192,8 +209,23 @@ void AxisMotor::run()
         if (executor_.has_value()) {
             executor_->onWakeup(bits);
         }
+        bool more_commands = executor_.has_value() && executor_->hasPendingCommands();
         unlock();
+
+        if ((bits & motion::TaskExit) != 0U) {
+            break;  // фазы уже сняты обработкой EmergencyStop
+        }
+        if (more_commands && task_handle_ != nullptr) {
+            // Остаток очереди после исчерпания бюджета обрабатывается без
+            // внешней отправки новой команды.
+            (void)xTaskNotify(task_handle_, motion::CommandPending, eSetBits);
+        }
     }
+
+    if (exit_sem_ != nullptr) {
+        (void)xSemaphoreGive(exit_sem_);
+    }
+    vTaskDelete(nullptr);
 }
 
 }  // namespace motor_hal

@@ -65,14 +65,31 @@ bool isMoving(const motion::AxisStatus &status)
            status.state == motion::AxisState::Decelerating;
 }
 
-bool waitUntilStopped(motor_hal::MotorService &service, motion::AxisId id,
-                      std::uint32_t timeout_ms)
+/**
+ * @brief Ждёт завершения конкретного перемещения.
+ *
+ * Нулевой скорости недостаточно: сразу после постановки команды в очередь ось
+ * ещё стоит, поэтому сначала подтверждаем начало движения, затем ждём
+ * ожидаемую позицию без Fault.
+ */
+bool waitForMoveCompletion(motor_hal::MotorService &service, motion::AxisId id,
+                           std::int64_t expected_position, std::uint32_t timeout_ms)
 {
     const TickType_t start = xTaskGetTickCount();
     const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
+    const std::int64_t initial_position = service.status(id).position_step;
+    bool accepted = false;
+
     while ((xTaskGetTickCount() - start) < timeout) {
         const motion::AxisStatus status = service.status(id);
-        if (!isMoving(status) && status.rate_steps_s == 0.0F) {
+        if (status.state == motion::AxisState::Fault || status.has_fault) {
+            return false;
+        }
+        if (!accepted && (isMoving(status) || status.position_step != initial_position)) {
+            accepted = true;
+        }
+        if (accepted && !isMoving(status) && status.rate_steps_s == 0.0F &&
+            status.position_step == expected_position) {
             return true;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -106,45 +123,54 @@ void runSelfTest(motor_hal::MotorService &service)
     (void)service.enable(motion::AxisId::Altitude);
 
     // Азимут: два оборота с разгоном и плавным остановом.
+    const std::int64_t azimuth_start = service.status(motion::AxisId::Azimuth).position_step;
     (void)service.moveSteps(motion::AxisId::Azimuth, 2 * kHalfStepsPerRevolution);
-    if (!waitUntilStopped(service, motion::AxisId::Azimuth, 30000)) {
-        ESP_LOGE(kTag, "azimuth did not stop in time");
+    if (!waitForMoveCompletion(service, motion::AxisId::Azimuth,
+                               azimuth_start + 2 * kHalfStepsPerRevolution, 30000)) {
+        ESP_LOGE(kTag, "azimuth move did not complete");
         (void)service.stopAxis(motion::AxisId::Azimuth, motion::StopMode::Immediate);
     }
     logAxis(service, motion::AxisId::Azimuth);
 
     // Высота: то же в обратном направлении.
+    const std::int64_t altitude_start = service.status(motion::AxisId::Altitude).position_step;
     (void)service.moveSteps(motion::AxisId::Altitude, -2 * kHalfStepsPerRevolution);
-    if (!waitUntilStopped(service, motion::AxisId::Altitude, 30000)) {
-        ESP_LOGE(kTag, "altitude did not stop in time");
+    if (!waitForMoveCompletion(service, motion::AxisId::Altitude,
+                               altitude_start - 2 * kHalfStepsPerRevolution, 30000)) {
+        ESP_LOGE(kTag, "altitude move did not complete");
         (void)service.stopAxis(motion::AxisId::Altitude, motion::StopMode::Immediate);
     }
     logAxis(service, motion::AxisId::Altitude);
 
-    // Одновременное движение.
+    // Одновременное движение и плавный останов.
     (void)service.setTargetRate(motion::AxisId::Azimuth, 400.0F);
     (void)service.setTargetRate(motion::AxisId::Altitude, -400.0F);
     vTaskDelay(pdMS_TO_TICKS(1000));
     (void)service.stopAll(motion::StopMode::Smooth);
-    (void)waitUntilStopped(service, motion::AxisId::Azimuth, 5000);
-    (void)waitUntilStopped(service, motion::AxisId::Altitude, 5000);
+    vTaskDelay(pdMS_TO_TICKS(2000));
 
     // Аварийный останов: задержка от запроса до снятия фаз.
     (void)service.setTargetRate(motion::AxisId::Azimuth, 600.0F);
     vTaskDelay(pdMS_TO_TICKS(300));
     const std::int64_t requested_us = esp_timer_get_time();
     (void)service.stopAll(motion::StopMode::Immediate);
-    std::int64_t released_us = requested_us;
+    bool deenergized = false;
+    std::int64_t released_us = 0;
     for (int i = 0; i < 200; ++i) {
         const motion::AxisStatus status = service.status(motion::AxisId::Azimuth);
         if (!isMoving(status) && !status.energized) {
             released_us = esp_timer_get_time();
+            deenergized = true;
             break;
         }
         vTaskDelay(1);
     }
-    ESP_LOGW(kTag, "emergency stop latency: %lld us",
-             static_cast<long long>(released_us - requested_us));
+    if (deenergized) {
+        ESP_LOGW(kTag, "emergency stop latency: %lld us",
+                 static_cast<long long>(released_us - requested_us));
+    } else {
+        ESP_LOGE(kTag, "emergency stop: de-energizing not confirmed within 200 ms");
+    }
     logAxis(service, motion::AxisId::Azimuth);
     logAxis(service, motion::AxisId::Altitude);
 }
@@ -162,7 +188,7 @@ extern "C" void app_main(void)
 
     ESP_ERROR_CHECK(board::init());
 
-    motion_hal::MotorService service;
+    motor_hal::MotorService service;
     const motion::AxisConfig configs[2] = {
         makeAxisConfig(motion::AxisId::Azimuth),
         makeAxisConfig(motion::AxisId::Altitude),

@@ -21,16 +21,6 @@ namespace {
 constexpr float kRateEpsilon = 1e-3F;
 constexpr double kUsPerSecond = 1'000'000.0;
 
-std::int32_t signOf(std::int64_t value) noexcept
-{
-    if (value > 0) {
-        return 1;
-    }
-    if (value < 0) {
-        return -1;
-    }
-    return 0;
-}
 
 bool sameHoldPolicy(const HoldPolicy &a, const HoldPolicy &b) noexcept
 {
@@ -196,8 +186,9 @@ bool AxisPlanner::apply(const AxisCommand &cmd) noexcept
         if (sameHoldPolicy(config_.hold, cmd.hold)) {
             return true;
         }
+        // Политика удержания не меняет подготовленное событие: текущий alarm
+        // не отменяется.
         config_.hold = cmd.hold;
-        ++intent_rev_;
         updateStatus();
         return true;
 
@@ -244,11 +235,17 @@ bool AxisPlanner::prepareNextStep(StepPlan &out) noexcept
 
     const std::int32_t ds = deltaHalfSteps(config_.pattern);
 
-    std::int64_t remaining_signed = 0;
-    std::int64_t remaining = 0;
+    // Остаток считается через беззнаковую разность: вычитание знаковых
+    // значений может переполниться при экстремальных позициях.
+    std::uint64_t remaining = 0;
+    bool forward_to_goal = true;
     if (position_mode_) {
-        remaining_signed = target_position_ - position_;
-        remaining = remaining_signed < 0 ? -remaining_signed : remaining_signed;
+        forward_to_goal = target_position_ >= position_;
+        remaining = forward_to_goal
+                        ? static_cast<std::uint64_t>(target_position_) -
+                              static_cast<std::uint64_t>(position_)
+                        : static_cast<std::uint64_t>(position_) -
+                              static_cast<std::uint64_t>(target_position_);
     }
 
     const float target_abs = std::fabs(target_rate_);
@@ -256,7 +253,7 @@ bool AxisPlanner::prepareNextStep(StepPlan &out) noexcept
 
     std::int32_t want = 0;
     if (position_mode_) {
-        want = signOf(remaining_signed);
+        want = (remaining == 0) ? 0 : (forward_to_goal ? 1 : -1);
     } else if (target_abs > kRateEpsilon) {
         want = target_rate_ > 0.0F ? 1 : -1;
     }
@@ -308,6 +305,14 @@ bool AxisPlanner::prepareNextStep(StepPlan &out) noexcept
         const double sq = v_begin * v_begin - 2.0 * decel * static_cast<double>(ds);
         v_end = sq > 0.0 ? std::sqrt(sq) : 0.0;
         reverse_after = (v_end <= static_cast<double>(kRateEpsilon)) && (want != 0);
+    } else if (moving && !position_mode_ && target_abs > kRateEpsilon &&
+               target_abs < v_) {
+        // Уменьшение уставки в том же направлении: тормозим с заданным decel,
+        // не опускаясь ниже новой уставки.
+        const double decel = static_cast<double>(config_.decel_steps_s2);
+        const double sq = v_begin * v_begin - 2.0 * decel * static_cast<double>(ds);
+        const double v_dec = sq > 0.0 ? std::sqrt(sq) : 0.0;
+        v_end = std::max(static_cast<double>(target_abs), v_dec);
     } else {
         double limit = static_cast<double>(config_.max_rate_steps_s);
         if (!position_mode_ && target_abs > kRateEpsilon) {
@@ -327,33 +332,42 @@ bool AxisPlanner::prepareNextStep(StepPlan &out) noexcept
     }
 
     if (position_mode_) {
-        const std::int64_t remaining_after = remaining - ds;
+        const std::uint64_t remaining_after = (remaining > static_cast<std::uint64_t>(ds))
+                                                  ? remaining - static_cast<std::uint64_t>(ds)
+                                                  : 0U;
         const double cap = remaining_after > 0
                                ? std::sqrt(2.0 * static_cast<double>(config_.decel_steps_s2) *
                                            static_cast<double>(remaining_after))
                                : 0.0;
         const double decel = static_cast<double>(config_.decel_steps_s2);
         if (!moving) {
-            // Старт: если цель ближе одного-двух событий, выходим на нулевую
-            // скорость к цели — явные начальные условия одиночного события.
+            // Старт из покоя: если цель ближе одного-двух событий, выходим на
+            // нулевую скорость к цели — это единственное разрешённое
+            // исключение, одиночное событие из состояния покоя.
             if (v_end > cap) {
                 v_end = cap;
             }
         } else {
-            // Нельзя тормозить быстрее заданного decel: если цель ближе
-            // тормозного пути, ось проходит её и возвращается штатным
-            // реверсом после полной остановки.
             const double sq = v_begin * v_begin - 2.0 * decel * static_cast<double>(ds);
             const double v_min = sq > 0.0 ? std::sqrt(sq) : 0.0;
-            // Последнее событие завершается нулевой скоростью только на
-            // «тактирующей» скорости: до него скорость уже ограничена cap
-            // предыдущих событий. На высокой скорости остановка в цели
-            // невозможна, ось проходит её и возвращается реверсом.
-            const double slow_enough = 2.0 * static_cast<double>(config_.start_rate_steps_s);
-            const bool final_event = (remaining_after == 0) && (v_begin <= slow_enough);
-            const double allowed = final_event ? 0.0 : std::max(cap, v_min);
-            if (v_end > allowed) {
-                v_end = allowed;
+            const double budget_sq = 2.0 * decel * static_cast<double>(remaining);
+            // Относительный допуск компенсирует округление float-скоростей:
+            // иначе на последнем событии разность 0.5 единицы v^2 превращается
+            // в лишний шаг перелёта.
+            const double budget_tolerance = budget_sq * 1e-3 + 1e-9;
+
+            if (v_begin * v_begin <= budget_sq + budget_tolerance) {
+                // Тормозной путь помещается в остаток: следуем cap. Инвариант
+                // v^2 <= 2*d*remaining гарантирует, что это замедление не
+                // круче decel, поэтому цель достигается точно и без скачка.
+                if (v_end > cap) {
+                    v_end = cap;
+                }
+            } else {
+                // Цель ближе тормозного пути (замена цели во время
+                // движения): скорость не обрезаем, проходим цель и
+                // возвращаемся штатным реверсом.
+                v_end = v_min;
             }
         }
     }
@@ -412,13 +426,13 @@ void AxisPlanner::commitPending() noexcept
 
     if (v_ <= kRateEpsilon) {
         v_ = 0.0F;
-        const std::int64_t remaining = position_mode_ ? target_position_ - position_ : 0;
-        const bool reversing = committed.reverse_after || remaining != 0;
+        const bool has_residual = position_mode_ && (target_position_ != position_);
+        const bool reversing = committed.reverse_after || has_residual;
         if (reversing && config_.reversal_pause_us > 0) {
             phase_ = Phase::Pause;
-            if (remaining > 0) {
+            if (position_mode_ && target_position_ > position_) {
                 pause_dir_ = Direction::Forward;
-            } else if (remaining < 0) {
+            } else if (position_mode_ && target_position_ < position_) {
                 pause_dir_ = Direction::Backward;
             } else {
                 pause_dir_ = committed.direction == Direction::Forward ? Direction::Backward
@@ -463,7 +477,6 @@ void AxisPlanner::forceReleased(ReleaseReason reason) noexcept
 
 void AxisPlanner::enterFault(FaultReason reason) noexcept
 {
-    (void)reason;
     pending_ = Pending{};
     v_ = 0.0F;
     target_rate_ = 0.0F;
@@ -472,6 +485,8 @@ void AxisPlanner::enterFault(FaultReason reason) noexcept
     fault_latched_ = true;
     state_ = AxisState::Fault;
     position_trusted_ = false;
+    status_.has_fault = true;
+    status_.fault_reason = reason;
     ++intent_rev_;
     updateStatus();
 }
@@ -486,6 +501,7 @@ void AxisPlanner::resetFault() noexcept
     pending_ = Pending{};
     state_ = AxisState::Disabled;
     phase_ = Phase::Idle;
+    status_.has_fault = false;
     ++intent_rev_;
     updateStatus();
 }

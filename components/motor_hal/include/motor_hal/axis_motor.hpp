@@ -61,6 +61,7 @@ private:
     std::optional<motion::AxisExecutor> executor_{};
     QueueHandle_t queue_ = nullptr;
     SemaphoreHandle_t mutex_ = nullptr;
+    SemaphoreHandle_t exit_sem_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
     bool running_ = false;
 };

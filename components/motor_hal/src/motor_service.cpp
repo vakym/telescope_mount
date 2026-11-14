@@ -35,9 +35,15 @@ esp_err_t MotorService::start(const board::MotorPins &pins, const motion::AxisCo
     ESP_RETURN_ON_ERROR(motors_[0].start(motion_.planner(motion::AxisId::Azimuth),
                                          pins.azimuth, configs[0]),
                         kTag, "azimuth start failed");
-    ESP_RETURN_ON_ERROR(motors_[1].start(motion_.planner(motion::AxisId::Altitude),
-                                         pins.altitude, configs[1]),
-                        kTag, "altitude start failed");
+
+    const esp_err_t altitude_err = motors_[1].start(motion_.planner(motion::AxisId::Altitude),
+                                                    pins.altitude, configs[1]);
+    if (altitude_err != ESP_OK) {
+        // Откат частичной инициализации: первая ось не должна остаться живой.
+        (void)motors_[0].stop();
+        ESP_LOGE(kTag, "altitude start failed, azimuth stopped");
+        return altitude_err;
+    }
 
     started_ = true;
     return ESP_OK;

@@ -33,18 +33,23 @@ esp_err_t CoilDriver::init(const board::CoilPins &pins, motion::StepPattern patt
 
 void CoilDriver::applyPhase()
 {
+    // Уровни пишутся без инверсии: invert_direction меняет только порядок
+    // обхода таблицы в advance(), а не последовательность возбуждения.
     const PhaseMask mask = tableFor(pattern_)[index_];
     for (std::size_t i = 0; i < 4; ++i) {
-        std::uint32_t level = ((mask >> i) & 0x1U) != 0U ? 1U : 0U;
-        if (invert_) {
-            level ^= 1U;
-        }
+        const std::uint32_t level = ((mask >> i) & 0x1U) != 0U ? 1U : 0U;
         (void)gpio_set_level(pins_.in[i], level);
     }
 }
 
 void CoilDriver::advance(motion::Direction direction)
 {
+    // Инверсия направления — обратный обход той же таблицы фаз.
+    if (invert_) {
+        direction = direction == motion::Direction::Forward ? motion::Direction::Backward
+                                                            : motion::Direction::Forward;
+    }
+
     const std::size_t length = patternLength(pattern_);
     if (direction == motion::Direction::Forward) {
         index_ = static_cast<std::uint8_t>((index_ + 1U) % length);

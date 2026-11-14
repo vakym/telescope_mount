@@ -354,6 +354,101 @@ void idempotentTargetAndFault()
     CHECK(rig.planner.apply(AxisCommand::setTargetRate(100.0F)));
 }
 
+void rateDecreaseRespectsDecel()
+{
+    Rig rig(baseConfig());
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(800.0F)));
+    (void)accelerateTo(rig.planner, 800.0F, nullptr, nullptr);
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(100.0F)));
+
+    float previous = std::fabs(rig.planner.status().rate_steps_s);
+    StepPlan plan{};
+    for (int i = 0; i < 5000 && rig.planner.prepareNextStep(plan); ++i) {
+        rig.planner.commitPending();
+        const float current = std::fabs(rig.planner.status().rate_steps_s);
+        // Замедление не круче заданного decel и без скачков вниз.
+        CHECK(current * current >= previous * previous - 2.0 * 800.0 - 1.0);
+        CHECK(current <= previous + 1e-3F);
+        previous = current;
+        if (current <= 100.0F + 1e-2F) {
+            break;
+        }
+    }
+    CHECK_NEAR(previous, 100.0, 0.5);
+
+    // Уставка удерживается, а не продолжает падать.
+    CHECK(rig.planner.prepareNextStep(plan));
+    rig.planner.commitPending();
+    CHECK_NEAR(std::fabs(rig.planner.status().rate_steps_s), 100.0, 0.5);
+}
+
+void negativeRateDecreaseRespectsDecel()
+{
+    Rig rig(baseConfig());
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(-800.0F)));
+    (void)accelerateTo(rig.planner, 800.0F, nullptr, nullptr);
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(-100.0F)));
+
+    float previous = std::fabs(rig.planner.status().rate_steps_s);
+    StepPlan plan{};
+    for (int i = 0; i < 5000 && rig.planner.prepareNextStep(plan); ++i) {
+        rig.planner.commitPending();
+        const float current = std::fabs(rig.planner.status().rate_steps_s);
+        CHECK(rig.planner.status().rate_steps_s < 0.0F);
+        CHECK(current * current >= previous * previous - 2.0 * 800.0 - 1.0);
+        previous = current;
+        if (current <= 100.0F + 1e-2F) {
+            break;
+        }
+    }
+    CHECK_NEAR(previous, 100.0, 0.5);
+}
+
+void replacementNearTargetRespectsDecel()
+{
+    Rig rig(baseConfig());
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(150.0F)));
+    (void)accelerateTo(rig.planner, 150.0F, nullptr, nullptr);
+
+    const std::int64_t start = rig.planner.status().position_step;
+    const std::int64_t target = start + 1;
+    CHECK(rig.planner.apply(AxisCommand::moveSteps(1)));
+
+    float previous = std::fabs(rig.planner.status().rate_steps_s);
+    std::int64_t max_position = start;
+    StepPlan plan{};
+    for (int i = 0; i < 20000 && rig.planner.prepareNextStep(plan); ++i) {
+        rig.planner.commitPending();
+        const float current = std::fabs(rig.planner.status().rate_steps_s);
+        if (plan.is_step) {
+            CHECK(current * current >= previous * previous - 2.0 * 800.0 - 1.0);
+        }
+        previous = current;
+        max_position = std::max(max_position, rig.planner.status().position_step);
+    }
+
+    CHECK(rig.planner.status().position_step == target);
+    CHECK_GT(max_position, target);  // цель ближе тормозного пути
+}
+
+void holdPolicyDoesNotReplan()
+{
+    Rig rig(baseConfig());
+    CHECK(rig.planner.apply(AxisCommand::setTargetRate(400.0F)));
+
+    StepPlan plan{};
+    CHECK(rig.planner.prepareNextStep(plan));
+    const std::uint32_t key = rig.planner.planKey();
+
+    motion::HoldPolicy policy{};
+    policy.hold_enabled = true;
+    policy.hold_timeout_ms = 100;
+    CHECK(rig.planner.apply(AxisCommand::setHoldPolicy(policy)));
+
+    CHECK(rig.planner.planKey() == key);  // alarm не отменяется
+    CHECK(rig.planner.hasPending());
+}
+
 void moveStepsZeroIsSmoothStop()
 {
     Rig rig(baseConfig());
@@ -383,6 +478,10 @@ int main()
     overflowRejected();
     invalidConfiguration();
     idempotentTargetAndFault();
+    rateDecreaseRespectsDecel();
+    negativeRateDecreaseRespectsDecel();
+    replacementNearTargetRespectsDecel();
+    holdPolicyDoesNotReplan();
     moveStepsZeroIsSmoothStop();
     return TEST_RESULT();
 }

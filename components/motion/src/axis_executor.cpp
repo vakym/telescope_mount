@@ -18,6 +18,17 @@
 #include "motion/axis_config.hpp"
 
 namespace motion {
+namespace {
+
+/// Насыщающее сложение дедлайнов.
+constexpr std::uint64_t satAdd(std::uint64_t a, std::uint64_t b) noexcept
+{
+    return (a > std::numeric_limits<std::uint64_t>::max() - b)
+               ? std::numeric_limits<std::uint64_t>::max()
+               : a + b;
+}
+
+}  // namespace
 
 AxisExecutor::AxisExecutor(AxisPlanner &planner,
                            AlarmSink &alarm,
@@ -126,7 +137,8 @@ void AxisExecutor::handleCommands() noexcept
     }
 
     if (!planner_.hasPending()) {
-        armNext();
+        // Новое движение: следующий дедлайн отсчитывается от текущего момента.
+        armNext(alarm_.nowUs());
     }
 }
 
@@ -151,7 +163,13 @@ void AxisExecutor::handleTimer() noexcept
         // Событие пришло раньше срока: шаг не исполняется, alarm остаётся
         // на прежнем дедлайне.
         if (pending_deadline_us_ > now) {
-            (void)alarm_.armAt(pending_deadline_us_);
+            if (!alarm_.armAt(pending_deadline_us_)) {
+                alarm_.disarm();
+                planner_.enterFault(FaultReason::ArmFailure);
+                coil_.release();
+                pending_deadline_us_ = 0;
+                pending_interval_us_ = 0;
+            }
         } else {
             planner_.noteStaleEvent();
         }
@@ -169,6 +187,8 @@ void AxisExecutor::handleTimer() noexcept
             break;
         }
 
+        const std::uint64_t executed_deadline = pending_deadline_us_;
+
         if (plan.is_step) {
             coil_.advance(plan.direction);
             last_switch_us_ = alarm_.nowUs();
@@ -178,7 +198,9 @@ void AxisExecutor::handleTimer() noexcept
         pending_deadline_us_ = 0;
         pending_interval_us_ = 0;
 
-        armNext();
+        // Абсолютное расписание: следующий срок считается от дедлайна
+        // исполненного события, а не от момента пробуждения задачи.
+        armNext(executed_deadline);
         if (!planner_.hasPending()) {
             startHoldOrRelease();
         }
@@ -227,7 +249,7 @@ void AxisExecutor::handleMissed(std::uint64_t now, FaultReason reason) noexcept
     }
 }
 
-void AxisExecutor::armNext() noexcept
+void AxisExecutor::armNext(std::uint64_t anchor_us) noexcept
 {
     if (!planner_.wantsStep()) {
         return;
@@ -247,9 +269,10 @@ void AxisExecutor::armNext() noexcept
     const AxisConfig &cfg = planner_.config();
     const std::uint64_t now = alarm_.nowUs();
     const std::uint64_t last_switch = last_switch_known_ ? last_switch_us_ : now;
+    const std::uint64_t desired_next = satAdd(anchor_us, plan.interval_us);
 
     const DeadlineDecision decision = planNextStep(now,
-                                                   now + plan.interval_us,
+                                                   desired_next,
                                                    last_switch,
                                                    plan.interval_us,
                                                    cfg.min_phase_interval_us,
@@ -279,7 +302,11 @@ void AxisExecutor::armNext() noexcept
         coil_.release();
         pending_deadline_us_ = 0;
         pending_interval_us_ = 0;
+        return;
     }
+
+    // Принятое возобновление движения снимает отсчёт удержания.
+    hold_timer_active_ = false;
 }
 
 void AxisExecutor::startHoldOrRelease() noexcept

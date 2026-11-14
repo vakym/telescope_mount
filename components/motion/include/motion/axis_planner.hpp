@@ -42,6 +42,8 @@ struct AxisStatus {
     std::uint64_t late_replans = 0;
     std::uint64_t stale_events = 0;
     std::uint64_t rejected_commands = 0;
+    bool has_fault = false;                       ///< причина Fault сохранена
+    FaultReason fault_reason = FaultReason::InvalidState;
 };
 
 class AxisPlanner {
