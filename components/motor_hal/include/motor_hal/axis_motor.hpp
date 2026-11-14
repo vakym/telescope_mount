@@ -31,7 +31,17 @@ namespace motor_hal {
 
 class AxisMotor final : private motion::CommandSource {
 public:
-    AxisMotor() = default;
+    /**
+     * @brief Создаёт статический api_mutex_.
+     *
+     * Контракт владения: создание, start(), stop() и разрушение выполняет
+     * один владелец (MotorService) до публикации объекта другим задачам.
+     * Конкурентный первый start() не поддерживается; после публикации
+     * потокобезопасны команды и статус.
+     */
+    AxisMotor();
+    /// Требует подтверждённого shutdown: при таймауте ждёт, а не разрушает
+    /// объект с работающей задачей.
     ~AxisMotor();
 
     AxisMotor(const AxisMotor &) = delete;
@@ -77,9 +87,10 @@ private:
     SemaphoreHandle_t exit_sem_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
 
-    /// Сериализует публичные методы и освобождение ресурсов. Создаётся один
-    /// раз и не удаляется в stop(), иначе проверка lifecycle_ и последующее
-    /// использование queue_ были бы гонкой.
+    /// Сериализует публичные методы и освобождение ресурсов. Создаётся в
+    /// конструкторе из статического хранилища и никогда не удаляется, иначе
+    /// проверка lifecycle_ и последующее использование queue_ были бы гонкой.
+    StaticSemaphore_t api_mutex_storage_{};
     SemaphoreHandle_t api_mutex_ = nullptr;
     Lifecycle lifecycle_ = Lifecycle::Stopped;
 };

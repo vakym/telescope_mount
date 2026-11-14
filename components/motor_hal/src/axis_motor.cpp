@@ -30,13 +30,35 @@ TickType_t usToTicksCeil(std::uint32_t wait_us) noexcept
 
 }  // namespace
 
+AxisMotor::AxisMotor()
+{
+    // Статическое хранилище: mutex существует с момента конструирования,
+    // поэтому ленивое создание (и гонка двух первых start()) невозможно.
+    api_mutex_ = xSemaphoreCreateMutexStatic(&api_mutex_storage_);
+}
+
 AxisMotor::~AxisMotor()
 {
-    (void)stop();
-    if (api_mutex_ != nullptr) {
-        vSemaphoreDelete(api_mutex_);
-        api_mutex_ = nullptr;
+    if (api_mutex_ == nullptr) {
+        return;
     }
+
+    // Работающая задача хранит this. Пока она не подтвердила завершение,
+    // разрушать объект нельзя: ждём, а не игнорируем таймаут.
+    bool warned = false;
+    for (;;) {
+        const esp_err_t err = stop();
+        if (err != ESP_ERR_TIMEOUT) {
+            break;
+        }
+        if (!warned) {
+            ESP_LOGE(kTag, "shutdown timeout: waiting for axis task before destruction");
+            warned = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // api_mutex_ создан статически и не удаляется: он не переживает объект.
 }
 
 esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
@@ -44,10 +66,7 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
                            const motion::AxisConfig &config)
 {
     if (api_mutex_ == nullptr) {
-        api_mutex_ = xSemaphoreCreateMutex();
-        if (api_mutex_ == nullptr) {
-            return ESP_ERR_NO_MEM;
-        }
+        return ESP_ERR_INVALID_STATE;
     }
 
     (void)xSemaphoreTake(api_mutex_, portMAX_DELAY);
