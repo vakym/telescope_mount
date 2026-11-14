@@ -31,6 +31,12 @@ namespace motor_hal {
 
 class AxisMotor final : private motion::CommandSource {
 public:
+    AxisMotor() = default;
+    ~AxisMotor();
+
+    AxisMotor(const AxisMotor &) = delete;
+    AxisMotor &operator=(const AxisMotor &) = delete;
+
     esp_err_t start(motion::AxisPlanner &planner,
                     const board::CoilPins &pins,
                     const motion::AxisConfig &config);
@@ -44,7 +50,8 @@ public:
 
     motion::AxisStatus status() const;
 
-    // motion::CommandSource
+    // motion::CommandSource. Вызывается только задачей этой оси:
+    // очередь защищена от удаления жизненным циклом (api_mutex_).
     std::size_t take(motion::AxisCommand *out, std::size_t max_count) override;
     bool empty() const override;
     void clear() override;
@@ -69,6 +76,11 @@ private:
     SemaphoreHandle_t mutex_ = nullptr;
     SemaphoreHandle_t exit_sem_ = nullptr;
     TaskHandle_t task_handle_ = nullptr;
+
+    /// Сериализует публичные методы и освобождение ресурсов. Создаётся один
+    /// раз и не удаляется в stop(), иначе проверка lifecycle_ и последующее
+    /// использование queue_ были бы гонкой.
+    SemaphoreHandle_t api_mutex_ = nullptr;
     Lifecycle lifecycle_ = Lifecycle::Stopped;
 };
 

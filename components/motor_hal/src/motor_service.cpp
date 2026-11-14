@@ -22,8 +22,23 @@ bool MotorService::valid(motion::AxisId id) noexcept
 
 esp_err_t MotorService::start(const board::MotorPins &pins, const motion::AxisConfig (&configs)[2])
 {
-    if (started_) {
+    if (state_ == State::Running) {
         return ESP_ERR_INVALID_STATE;
+    }
+
+    // После неудачного stop() оси могли остаться в Stopping: повторная
+    // конфигурация планировщиков недопустима, пока они не завершились.
+    const esp_err_t stop_err = stop();
+    if (stop_err != ESP_OK) {
+        return stop_err;
+    }
+
+    for (auto &motor : motors_) {
+        const esp_err_t err = motor.stop();
+        if (err != ESP_OK) {
+            state_ = State::Stopping;
+            return err;
+        }
     }
 
     for (std::size_t i = 0; i < kAxisCount; ++i) {
@@ -32,30 +47,43 @@ esp_err_t MotorService::start(const board::MotorPins &pins, const motion::AxisCo
                             kTag, "invalid axis config for axis %u", static_cast<unsigned>(i));
     }
 
-    ESP_RETURN_ON_ERROR(motors_[0].start(motion_.planner(motion::AxisId::Azimuth),
-                                         pins.azimuth, configs[0]),
-                        kTag, "azimuth start failed");
+    const esp_err_t azimuth_err = motors_[0].start(motion_.planner(motion::AxisId::Azimuth),
+                                                   pins.azimuth, configs[0]);
+    if (azimuth_err != ESP_OK) {
+        state_ = State::Idle;  // start() оси откатил свои ресурсы
+        return azimuth_err;
+    }
 
     const esp_err_t altitude_err = motors_[1].start(motion_.planner(motion::AxisId::Altitude),
                                                     pins.altitude, configs[1]);
     if (altitude_err != ESP_OK) {
         // Откат частичной инициализации: первая ось не должна остаться живой.
-        (void)motors_[0].stop();
-        ESP_LOGE(kTag, "altitude start failed, azimuth stopped");
+        ESP_LOGE(kTag, "altitude start failed, stopping azimuth");
+        const esp_err_t rollback_err = stop();
+        if (rollback_err != ESP_OK) {
+            state_ = State::Stopping;
+            return rollback_err;
+        }
         return altitude_err;
     }
 
-    started_ = true;
+    state_ = State::Running;
     return ESP_OK;
 }
 
 esp_err_t MotorService::stop()
 {
+    esp_err_t result = ESP_OK;
+    // Останавливаем обе оси всегда, даже если первая вернула ошибку.
     for (auto &motor : motors_) {
-        (void)motor.stop();
+        const esp_err_t err = motor.stop();
+        if (result == ESP_OK && err != ESP_OK) {
+            result = err;
+        }
     }
-    started_ = false;
-    return ESP_OK;
+
+    state_ = (result == ESP_OK) ? State::Idle : State::Stopping;
+    return result;
 }
 
 bool MotorService::enable(motion::AxisId id)

@@ -344,6 +344,56 @@ void holdPolicyInfiniteToFinite()
     CHECK(rig.planner.status().state == AxisState::Released);
 }
 
+void repeatedPolicyDoesNotExtendHold()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 20;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    const int releases = rig.coil.releases;
+    motion::HoldPolicy same{};
+    same.hold_enabled = true;
+    same.hold_timeout_ms = 20;
+
+    // Повтор идентичной политики не продлевает срок.
+    rig.clock.now += 10000;
+    rig.send(AxisCommand::setHoldPolicy(same));
+    CHECK(rig.coil.releases == releases);
+
+    rig.clock.now += 11000;  // t0 + 21 мс > исходного таймаута
+    rig.executor.onWakeup(0U);
+    CHECK(rig.coil.releases > releases);
+    CHECK(rig.planner.status().state == AxisState::Released);
+}
+
+void repeatedEnergizeDoesNotExtendHold()
+{
+    motion::AxisConfig cfg = baseConfig();
+    cfg.hold.hold_enabled = true;
+    cfg.hold.hold_timeout_ms = 20;
+
+    Rig rig(cfg);
+    rig.send(AxisCommand::enable());
+    rig.send(AxisCommand::moveSteps(1));
+    rig.fireDue();
+    CHECK(rig.planner.status().state == AxisState::Holding);
+
+    const int releases = rig.coil.releases;
+    rig.clock.now += 10000;
+    rig.send(AxisCommand::energize());  // уже Holding: идемпотентно
+
+    rig.clock.now += 11000;
+    rig.executor.onWakeup(0U);
+    CHECK(rig.coil.releases > releases);
+    CHECK(rig.planner.status().state == AxisState::Released);
+}
+
 void energizeStartsFiniteHold()
 {
     motion::AxisConfig cfg = baseConfig();
@@ -533,6 +583,8 @@ int main()
     holdPolicyFiniteToInfinite();
     holdPolicyInfiniteToDisabled();
     holdPolicyInfiniteToFinite();
+    repeatedPolicyDoesNotExtendHold();
+    repeatedEnergizeDoesNotExtendHold();
     energizeStartsFiniteHold();
     resumeCancelsHoldTimer();
     holdExpiryIsIndependentOfCommands();

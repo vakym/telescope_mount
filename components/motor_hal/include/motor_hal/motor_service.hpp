@@ -35,12 +35,16 @@ public:
     motion::AxisStatus status(motion::AxisId id) const;
 
 private:
+    /// Idle — можно запускать; Running — работает; Stopping — не все оси
+    /// подтвердили останов, повторный stop() обязателен до нового start().
+    enum class State : std::uint8_t { Idle, Running, Stopping };
+
     static constexpr std::size_t kAxisCount = static_cast<std::size_t>(motion::AxisId::Count);
     static bool valid(motion::AxisId id) noexcept;
 
     motion::MotionController motion_{};
     std::array<AxisMotor, kAxisCount> motors_{};
-    bool started_ = false;
+    State state_ = State::Idle;
 };
 
 }  // namespace motor_hal

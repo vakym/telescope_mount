@@ -28,6 +28,11 @@ constexpr std::uint64_t satAdd(std::uint64_t a, std::uint64_t b) noexcept
                : a + b;
 }
 
+bool sameHoldPolicy(const motion::HoldPolicy &a, const motion::HoldPolicy &b) noexcept
+{
+    return a.hold_enabled == b.hold_enabled && a.hold_timeout_ms == b.hold_timeout_ms;
+}
+
 }  // namespace
 
 AxisExecutor::AxisExecutor(AxisPlanner &planner,
@@ -92,6 +97,8 @@ void AxisExecutor::handleCommands() noexcept
 
     while (processed < params_.command_budget && source_.take(&cmd, 1U) == 1U) {
         const std::uint32_t key_before = planner_.planKey();
+        const motion::HoldPolicy policy_before = planner_.config().hold;
+        const AxisState state_before = planner_.status().state;
         const bool accepted = planner_.apply(cmd);
         if (!accepted) {
             processed += 1U;
@@ -116,7 +123,14 @@ void AxisExecutor::handleCommands() noexcept
             break;
         }
 
-        if (cmd.kind == CommandKind::SetHoldPolicy || cmd.kind == CommandKind::Energize) {
+        // Удержание пересчитывается только при фактическом изменении политики
+        // или первом переходе в Holding. Повторные идентичные команды не
+        // продлевают таймаут.
+        if (cmd.kind == CommandKind::SetHoldPolicy &&
+            !sameHoldPolicy(policy_before, planner_.config().hold)) {
+            syncHoldState();
+        }
+        if (cmd.kind == CommandKind::Energize && state_before != AxisState::Holding) {
             syncHoldState();
         }
         processed += 1U;
