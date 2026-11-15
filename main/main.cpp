@@ -11,6 +11,7 @@
 
 #include "board/board.hpp"
 #include "esp_chip_info.h"
+#include "esp_err.h"
 #include "esp_flash.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
@@ -18,6 +19,8 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "input/button_debouncer.hpp"
+#include "input_hal/joystick_service.hpp"
 #include "motion/axis_config.hpp"
 #include "motor_hal/motor_service.hpp"
 #include "sdkconfig.h"
@@ -28,6 +31,32 @@ constexpr const char *kTag = "telescope_mount";
 
 /// Полушагов на оборот выходного вала 28BYJ-48 (номинал).
 constexpr std::int64_t kHalfStepsPerRevolution = 4096;
+
+const char *buttonEventName(input::ButtonEvent event)
+{
+    switch (event) {
+        case input::ButtonEvent::Pressed:
+            return "pressed";
+        case input::ButtonEvent::Released:
+            return "released";
+        case input::ButtonEvent::Click:
+            return "click";
+        case input::ButtonEvent::LongPress:
+            return "long_press";
+        case input::ButtonEvent::None:
+            break;
+    }
+    return "none";
+}
+
+/// Только логирование: конкретное действие кнопки пока не назначено.
+class LoggingButtonListener final : public input::ButtonListener {
+public:
+    void onButtonEvent(input::ButtonEvent event) override
+    {
+        ESP_LOGI(kTag, "joystick button: %s", buttonEventName(event));
+    }
+};
 
 void logChipInfo()
 {
@@ -95,6 +124,24 @@ bool waitForMoveCompletion(motor_hal::MotorService &service, motion::AxisId id,
         vTaskDelay(pdMS_TO_TICKS(10));
     }
     return false;
+}
+
+void logJoystick(input_hal::JoystickService &service)
+{
+    const input_hal::JoystickStatus status = service.status();
+    ESP_LOGI(kTag,
+             "joystick: calibrated=%d sample=%d output=%d fault=%d neutral=%d "
+             "x=%.3f y=%.3f raw=%u/%u last_valid_us=%llu errors=%lu events=%lu",
+             status.calibrated ? 1 : 0, status.sample_valid ? 1 : 0,
+             status.output_valid ? 1 : 0, status.read_fault ? 1 : 0,
+             status.neutral ? 1 : 0,
+             static_cast<double>(status.stick.normalized[0]),
+             static_cast<double>(status.stick.normalized[1]),
+             static_cast<unsigned>(status.raw.counts[0]),
+             static_cast<unsigned>(status.raw.counts[1]),
+             static_cast<unsigned long long>(status.last_valid_us),
+             static_cast<unsigned long>(status.read_errors),
+             static_cast<unsigned long>(status.button_events));
 }
 
 void logAxis(motor_hal::MotorService &service, motion::AxisId id)
@@ -200,10 +247,23 @@ extern "C" void app_main(void)
     runSelfTest(service);
 #endif
 
+    // Запуск после самотеста: синхронная калибровка до 10 с не задерживает
+    // проверку приводов. Джойстик только публикует состояние, MotorService
+    // здесь не используется.
+    LoggingButtonListener button_listener;
+    input_hal::JoystickService joystick;
+    const esp_err_t joystick_err =
+        joystick.start(board::kJoystickPins, &button_listener);
+    if (joystick_err != ESP_OK) {
+        ESP_LOGE(kTag, "joystick unavailable: %s",
+                 esp_err_to_name(joystick_err));
+    }
+
     while (true) {
         ESP_LOGI(kTag, "heartbeat");
         logAxis(service, motion::AxisId::Azimuth);
         logAxis(service, motion::AxisId::Altitude);
+        logJoystick(joystick);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_STATUS_PERIOD_MS));
     }
 }

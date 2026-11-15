@@ -1,0 +1,117 @@
+menu "Telescope mount joystick"
+
+    config JOY_SAMPLE_PERIOD_MS
+        int "Joystick sample period (ms)"
+        range 1 1000
+        default 20
+        help
+            Период опроса ADC и калибровочных чтений. Отсчёты берутся по
+            одному за период, а не серией быстрых чтений.
+
+    config JOY_TASK_STACK
+        int "Joystick task stack size (bytes)"
+        range 2048 8192
+        default 3072
+
+    config JOY_TASK_PRIORITY
+        int "Joystick task priority"
+        range 1 15
+        default 5
+
+    config JOY_TASK_CORE
+        int "Joystick task core"
+        range 0 1
+        default 0
+
+    config JOY_ADC_OVERSAMPLE
+        int "ADC oversample per channel"
+        range 1 16
+        default 4
+
+    config JOY_CALIBRATE_ON_BOOT
+        bool "Calibrate stick center at boot"
+        default y
+        help
+            Пользователь обязан отпустить стик при включении. Алгоритм
+            проверяет только стабильность серии и правдоподобие центра и не
+            доказывает механическую нейтраль.
+
+    config JOY_CALIBRATION_SAMPLES
+        int "Calibration samples"
+        range 1 1024
+        default 64
+
+    config JOY_CALIBRATION_TIMEOUT_MS
+        int "Calibration timeout (ms)"
+        range 100 60000
+        default 10000
+
+    config JOY_CALIBRATION_NOISE_LIMIT
+        int "Calibration peak-to-peak limit (counts)"
+        range 0 4095
+        default 120
+
+    config JOY_CENTER_MIN
+        int "Minimum plausible center (counts)"
+        range 0 4095
+        default 1000
+
+    config JOY_CENTER_MAX
+        int "Maximum plausible center (counts)"
+        range 0 4095
+        default 3095
+
+    config JOY_DEFAULT_CENTER
+        int "Default center when calibration is disabled (counts)"
+        range 1 4094
+        default 2048
+
+    config JOY_DEAD_ZONE_PERMILLE
+        int "Dead zone entry (per mille)"
+        range 1 999
+        default 120
+
+    config JOY_DEAD_ZONE_EXIT_PERMILLE
+        int "Dead zone exit (per mille)"
+        range 0 998
+        default 100
+
+    config JOY_FILTER_ALPHA_X100
+        int "EMA alpha x100"
+        range 1 100
+        default 25
+
+    config JOY_INVERT_X
+        bool "Invert logical X axis"
+        default n
+
+    config JOY_INVERT_Y
+        bool "Invert logical Y axis"
+        default n
+
+    config JOY_ERROR_THRESHOLD
+        int "Consecutive read errors before fault"
+        range 1 1000
+        default 5
+
+    config JOY_RECOVERY_THRESHOLD
+        int "Consecutive successful reads before recovery"
+        range 1 1000
+        default 5
+
+    config JOY_BUTTON_DEBOUNCE_MS
+        int "Button debounce (ms)"
+        range 1 1000
+        default 40
+
+    config JOY_BUTTON_LONG_PRESS_MS
+        int "Button long press (ms)"
+        range 1 60000
+        default 1000
+
+    config JOY_STOP_TIMEOUT_MS
+        int "Task stop confirmation timeout (ms)"
+        range 10 10000
+        default 1000
+
+endmenu
