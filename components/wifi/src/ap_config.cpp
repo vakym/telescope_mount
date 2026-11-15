@@ -144,6 +144,23 @@ FieldMerge mergePassword(AccessPointConfig &config, bool kconfig_valid,
     return merge;
 }
 
+FieldOutcome resolveField(bool kconfig_valid, NvsValue value,
+                          bool applied) noexcept
+{
+    FieldOutcome outcome;
+    outcome.nvs_applied = applied;
+    if (applied) {
+        return outcome;
+    }
+    outcome.nvs_rejected = value != NvsValue::Absent;
+    if (!kconfig_valid) {
+        outcome.issue = FieldIssue::KconfigInvalid;
+    } else if (outcome.nvs_rejected) {
+        outcome.issue = FieldIssue::InvalidNvs;
+    }
+    return outcome;
+}
+
 const char *errorName(ConfigError error) noexcept
 {
     switch (error) {

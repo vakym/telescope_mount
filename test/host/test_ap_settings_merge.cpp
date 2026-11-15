@@ -83,19 +83,29 @@ struct SsidResolution {
     ConfigError final_error = ConfigError::None;
 };
 
-SsidResolution resolveSsid(NvsValue value, const char *nvs_text)
+SsidResolution resolveSsidWith(const char *kconfig_ssid, NvsValue value,
+                               const char *nvs_text)
 {
     SsidResolution resolution;
-    char ssid33[wifi::kSsidCapacity + 1]{};
-    fillString(ssid33, wifi::kSsidCapacity, 's');  // 33 символа
-    resolution.kconfig_valid = wifi::setSsid(resolution.settings.ap, ssid33);
-    CHECK(!resolution.kconfig_valid);
+    resolution.kconfig_valid =
+        wifi::setSsid(resolution.settings.ap, kconfig_ssid);
+    if (!resolution.kconfig_valid) {
+        resolution.settings.ap.ssid[0] = '\0';
+    }
     CHECK(wifi::setPassword(resolution.settings.ap, "12345678"));
     resolution.merge = wifi::mergeSsid(resolution.settings.ap,
                                        resolution.kconfig_valid, value,
                                        nvs_text);
     resolution.final_error = wifi::validate(resolution.settings);
     return resolution;
+}
+
+/// Kconfig SSID из 33 символов: значение непригодно.
+SsidResolution resolveSsid(NvsValue value, const char *nvs_text)
+{
+    char ssid33[wifi::kSsidCapacity + 1]{};
+    fillString(ssid33, wifi::kSsidCapacity, 's');
+    return resolveSsidWith(ssid33, value, nvs_text);
 }
 
 bool startAllowed(const SsidResolution &resolution)
@@ -220,6 +230,75 @@ void longKconfigSsidInvalidNvs()
     CHECK(!startAllowed(resolution));
 }
 
+wifi::FieldOutcome passwordOutcome(const PasswordResolution &resolution,
+                                   NvsValue value)
+{
+    return wifi::resolveField(!resolution.merge.kconfig_invalid, value,
+                              resolution.merge.applied);
+}
+
+void diagnosticsShortNvsPassword()
+{
+    const PasswordResolution resolution =
+        resolvePassword("12345678", NvsValue::Present, "12345");
+    const wifi::FieldOutcome outcome =
+        passwordOutcome(resolution, NvsValue::Present);
+    CHECK(!outcome.nvs_applied);
+    CHECK(outcome.nvs_rejected);
+    CHECK(outcome.issue == wifi::FieldIssue::InvalidNvs);
+    // Пароль Kconfig сохранён.
+    CHECK(equals(resolution.settings.ap.password, "12345678"));
+}
+
+void diagnosticsEmptyNvsSsid()
+{
+    // Валидный Kconfig-SSID и пустое, но присутствующее значение NVS.
+    const SsidResolution resolution =
+        resolveSsidWith("mount_01", NvsValue::Present, "");
+    const wifi::FieldOutcome outcome = wifi::resolveField(
+        !resolution.merge.kconfig_invalid, NvsValue::Present,
+        resolution.merge.applied);
+    CHECK(!outcome.nvs_applied);
+    CHECK(outcome.nvs_rejected);
+    CHECK(outcome.issue == wifi::FieldIssue::InvalidNvs);
+}
+
+void diagnosticsRejectedNvsKeepsKconfigInvalid()
+{
+    char long_password[kLongPasswordLength + 1]{};
+    fillString(long_password, kLongPasswordLength, 'p');
+
+    const PasswordResolution resolution =
+        resolvePassword(long_password, NvsValue::Present, "12345");
+    const wifi::FieldOutcome outcome =
+        passwordOutcome(resolution, NvsValue::Present);
+    CHECK(outcome.nvs_rejected);
+    CHECK(outcome.issue == wifi::FieldIssue::KconfigInvalid);
+    CHECK(!startAllowed(resolution));
+}
+
+void diagnosticsAppliedNvs()
+{
+    const PasswordResolution resolution =
+        resolvePassword("12345678", NvsValue::Present, "87654321");
+    const wifi::FieldOutcome outcome =
+        passwordOutcome(resolution, NvsValue::Present);
+    CHECK(outcome.nvs_applied);
+    CHECK(!outcome.nvs_rejected);
+    CHECK(outcome.issue == wifi::FieldIssue::None);
+}
+
+void diagnosticsAbsentNvs()
+{
+    const PasswordResolution resolution =
+        resolvePassword("12345678", NvsValue::Absent, "");
+    const wifi::FieldOutcome outcome =
+        passwordOutcome(resolution, NvsValue::Absent);
+    CHECK(!outcome.nvs_applied);
+    CHECK(!outcome.nvs_rejected);
+    CHECK(outcome.issue == wifi::FieldIssue::None);
+}
+
 }  // namespace
 
 int main()
@@ -234,5 +313,10 @@ int main()
     longKconfigSsidWithoutOverride();
     longKconfigSsidValidNvs();
     longKconfigSsidInvalidNvs();
+    diagnosticsShortNvsPassword();
+    diagnosticsEmptyNvsSsid();
+    diagnosticsRejectedNvsKeepsKconfigInvalid();
+    diagnosticsAppliedNvs();
+    diagnosticsAbsentNvs();
     return TEST_RESULT();
 }

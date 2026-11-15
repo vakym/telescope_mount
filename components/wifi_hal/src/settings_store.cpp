@@ -144,18 +144,27 @@ wifi::NvsValue readStringValue(nvs_handle_t handle, const char *key,
 void applyStringMerge(const wifi::FieldMerge &merge, wifi::NvsValue value,
                       FieldStatus &status, LoadResult &result) noexcept
 {
-    if (merge.applied) {
+    const wifi::FieldOutcome outcome =
+        wifi::resolveField(!merge.kconfig_invalid, value, merge.applied);
+    if (outcome.nvs_applied) {
         status.source = SettingSource::Nvs;
         status.issue = SettingIssue::None;
         return;
     }
-    if (value == wifi::NvsValue::Invalid) {
+    // Присутствующее, но отвергнутое значение NVS — тоже невалидность,
+    // даже если значение Kconfig осталось валидным.
+    if (outcome.nvs_rejected) {
         result.any_invalid = true;
     }
-    if (merge.kconfig_invalid) {
-        status.issue = SettingIssue::KconfigInvalid;
-    } else if (value == wifi::NvsValue::Invalid) {
-        status.issue = SettingIssue::InvalidValue;
+    switch (outcome.issue) {
+        case wifi::FieldIssue::KconfigInvalid:
+            status.issue = SettingIssue::KconfigInvalid;
+            break;
+        case wifi::FieldIssue::InvalidNvs:
+            status.issue = SettingIssue::InvalidValue;
+            break;
+        case wifi::FieldIssue::None:
+            break;
     }
 }
 
@@ -174,6 +183,9 @@ bool readSsid(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     const bool kconfig_valid = status.issue != SettingIssue::KconfigInvalid;
     const wifi::FieldMerge merge =
         wifi::mergeSsid(settings.ap, kconfig_valid, value, buffer);
+    if (value == wifi::NvsValue::Present && !merge.applied) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid value", kKeySsid);
+    }
     applyStringMerge(merge, value, status, result);
     return merge.applied;
 }
@@ -193,6 +205,10 @@ bool readPassword(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     const bool kconfig_valid = status.issue != SettingIssue::KconfigInvalid;
     const wifi::FieldMerge merge =
         wifi::mergePassword(settings.ap, kconfig_valid, value, buffer);
+    if (value == wifi::NvsValue::Present && !merge.applied) {
+        // Содержимое пароля не логируется.
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid value", kKeyPassword);
+    }
     applyStringMerge(merge, value, status, result);
     return merge.applied;
 }

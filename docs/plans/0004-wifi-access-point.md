@@ -300,6 +300,18 @@ FieldMerge mergeSsid(AccessPointConfig &config, bool kconfig_valid,
 FieldMerge mergePassword(AccessPointConfig &config, bool kconfig_valid,
                          NvsValue value, const char *text) noexcept;
 
+enum class FieldIssue : std::uint8_t { None, InvalidNvs, KconfigInvalid };
+
+struct FieldOutcome {
+    bool nvs_applied = false;
+    bool nvs_rejected = false;  ///< значение было, но не применено
+    FieldIssue issue = FieldIssue::None;
+};
+
+/// Отвергнутое присутствующее значение NVS учитывается всегда.
+FieldOutcome resolveField(bool kconfig_valid, NvsValue value,
+                          bool applied) noexcept;
+
 }  // namespace wifi
 ```
 
@@ -625,6 +637,12 @@ public:
   **не снимает** `KconfigInvalid`: признаки сохраняются одновременно, и
   запуск отвергается, пока не применится валидное значение. Признак
   снимается только успешным применением;
+- диагностика поля строится функцией `wifi::resolveField()`: присутствующее,
+  но отвергнутое значение NVS (короткий пароль, пустой SSID, непечатаемые
+  символы, неправильный тип, слишком длинная строка) даёт `InvalidNvs` и
+  `any_invalid`, даже если значение Kconfig осталось валидным. При
+  непригодном Kconfig итоговый признак — `KconfigInvalid`, а `any_invalid`
+  тоже выставляется. Отсутствие ключа не считается невалидностью;
 - явно сохранённая в NVS пустая строка пароля — валидное переопределение
   открытой сети и снимает `KconfigInvalid`, как любое другое валидное
   значение;
@@ -1162,6 +1180,16 @@ enum class ButtonEvent : std::uint8_t {
 `validate()` на пустом пароле проблему не видит, решение принимает
 `KconfigInvalid`.
 
+Диагностика (`wifi::resolveField()`) проверяется отдельно:
+
+| Ситуация | Ожидание |
+|---|---|
+| валидный Kconfig + короткий NVS-пароль | Kconfig сохранён, `InvalidNvs`, `nvs_rejected` |
+| валидный Kconfig + пустой NVS-SSID | `InvalidNvs`, `nvs_rejected` |
+| непригодный Kconfig + отвергнутая строка NVS | `KconfigInvalid`, `nvs_rejected`, запуск запрещён |
+| валидное значение NVS | `nvs_applied`, проблемы нет |
+| ключа NVS нет | не `nvs_rejected`, проблемы нет |
+
 `test/host/test_toggle_admission.cpp`:
 
 1. `Accepted` при `Running` и известном состоянии: `pending = 1`,
@@ -1336,7 +1364,8 @@ enum class ButtonEvent : std::uint8_t {
    валидный ключ NVS переопределяет Kconfig, отсутствующий замещается,
    невалидный игнорируется с предупреждением. Невалидное значение NVS не
    снимает признак непригодного значения Kconfig: запуск отвергается, пока
-   поле не заменено валидным значением.
+   поле не заменено валидным значением. Отвергнутое значение NVS видно в
+   статусе как `InvalidValue` и `any_invalid`.
 6. Двойное нажатие выключает и включает AP; одиночное нажатие и удержание
    AP не меняют.
 7. Состояние переключения не сохраняется; действует `start_on_boot`.
@@ -1482,6 +1511,12 @@ enum class ButtonEvent : std::uint8_t {
   больше не снимает `KconfigInvalid`, пустая строка пароля из NVS
   переопределяет непригодный Kconfig как намеренная открытая сеть. Добавлен
   `test_ap_settings_merge` — 11 из 11 host-тестов.
+- 2026-11-15 — диагностика отвергнутой строки NVS исправлена: введён
+  `wifi::resolveField()`, присутствующее но не применённое значение даёт
+  `InvalidNvs` и `any_invalid` даже при валидном Kconfig; при непригодном
+  Kconfig сохраняется `KconfigInvalid`. Добавлены проверки `resolveField`
+  на короткий пароль, пустой SSID, отвергнутую строку при непригодном
+  Kconfig, успешное применение и отсутствие ключа. Host-тесты: 11 из 11.
 - Осталось: `idf.py build`, стендовые проверки раздела 12.
 
 ## Приложение А. Карта замечаний ревью редакции 2

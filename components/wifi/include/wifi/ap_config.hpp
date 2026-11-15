@@ -96,6 +96,32 @@ FieldMerge mergeSsid(AccessPointConfig &config, bool kconfig_valid,
 FieldMerge mergePassword(AccessPointConfig &config, bool kconfig_valid,
                          NvsValue value, const char *text) noexcept;
 
+/// Итоговая проблема поля после слияния.
+enum class FieldIssue : std::uint8_t {
+    None,
+    /// Значение NVS присутствовало и было отвергнуто.
+    InvalidNvs,
+    /// Значение Kconfig непригодно и не заменено валидным NVS.
+    KconfigInvalid,
+};
+
+/// Диагностика поля после слияния.
+struct FieldOutcome {
+    bool nvs_applied = false;
+    /// Значение NVS присутствовало, но не применено.
+    bool nvs_rejected = false;
+    FieldIssue issue = FieldIssue::None;
+};
+
+/**
+ * @brief Итог слияния для диагностики и решения о запуске.
+ *
+ * Отвергнутое присутствующее значение NVS всегда учитывается как
+ * `nvs_rejected`, даже если значение Kconfig осталось валидным.
+ */
+FieldOutcome resolveField(bool kconfig_valid, NvsValue value,
+                          bool applied) noexcept;
+
 /// Имя ошибки для лога; для ConfigError::None возвращает "none".
 const char *errorName(ConfigError error) noexcept;
 
