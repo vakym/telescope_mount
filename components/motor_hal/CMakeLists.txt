@@ -10,5 +10,8 @@ idf_component_register(
         "src/axis_motor.cpp"
         "src/motor_service.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES board motion driver
+    # esp_driver_gpio: driver/gpio.h (gpio_set_level в coil_driver.cpp).
+    # esp_driver_gptimer: driver/gptimer.h подключается из публичного
+    # gptimer_step_clock.hpp, поэтому требование публичное.
+    REQUIRES board motion driver esp_driver_gpio esp_driver_gptimer
 )

@@ -9,5 +9,7 @@ idf_component_register(
         "src/button_input.cpp"
         "src/joystick_service.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES board input driver esp_adc esp_timer
+    # esp_driver_gpio: driver/gpio.h подключается из публичного button_input.hpp,
+    # поэтому требование публичное.
+    REQUIRES board input driver esp_adc esp_timer esp_driver_gpio
 )

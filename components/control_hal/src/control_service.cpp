@@ -201,7 +201,7 @@ esp_err_t ControlService::start(const control::JoyMappingConfig &mapping)
     stop_config.confirm_timeout_us = CONFIG_CTRL_STOP_CONFIRM_TIMEOUT_US;
     stop_protocol_.configure(stop_config);
 
-    control::ArmingMachine::Config arming_config{};
+    control::ArmingConfig arming_config{};
     arming_config.delivery_failure_limit = CONFIG_CTRL_DELIVERY_FAILURE_LIMIT;
     arming_.configure(arming_config);
     const state::LatchCode saved_latch = latch();

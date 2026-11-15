@@ -99,7 +99,11 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
     params.watchdog_us = CONFIG_MOTOR_EVENT_WATCHDOG_US;
     params.command_budget = CONFIG_MOTOR_CMD_BUDGET_PER_ITERATION;
     params.command_epoch = epoch_;
-    executor_.emplace(planner, clock_, coil_, *this, params);
+    // Наследование CommandSource приватное, а is_constructible внутри
+    // std::optional проверяется вне контекста класса, где такое преобразование
+    // недоступно. Приводим явно здесь, в теле члена AxisMotor.
+    motion::CommandSource &source = *this;
+    executor_.emplace(planner, clock_, coil_, source, params);
 
     queue_ = xQueueCreate(CONFIG_MOTOR_CMD_QUEUE_LEN, sizeof(motion::AxisCommand));
     mutex_ = xSemaphoreCreateMutex();
