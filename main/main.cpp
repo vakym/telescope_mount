@@ -16,11 +16,13 @@
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_flash.h"
+#include "esp_heap_caps.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "input/button_debouncer.hpp"
 #include "input_hal/joystick_service.hpp"
@@ -28,6 +30,7 @@
 #include "motor_hal/motor_service.hpp"
 #include "sdkconfig.h"
 #include "state/channels.hpp"
+#include "state/observation.hpp"
 #include "state_hal/state_hub.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
@@ -317,6 +320,116 @@ void logControl(control_hal::ControlService &control)
              static_cast<unsigned long>(status.cycles));
 }
 
+#if CONFIG_APP_MEMORY_DIAGNOSTICS
+
+/**
+ * @brief Счётчики heap по отдельным capability-наборам.
+ *
+ * Категории INTERNAL, DMA и SPIRAM пересекаются, поэтому печатаются
+ * раздельно и не суммируются. Функция только читает счётчики аллокатора,
+ * не удерживает моторные мьютексы и допустима во время движения.
+ */
+void logHeapSummary(const char *when)
+{
+    multi_heap_info_t info{};
+    heap_caps_get_info(&info, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_LOGI(kTag,
+             "heap[%s]: free=%u min_free=%u largest=%u allocated=%u "
+             "blocks=%u/%u dma_free=%u spiram_free=%u",
+             when,
+             static_cast<unsigned>(info.total_free_bytes),
+             static_cast<unsigned>(info.minimum_free_bytes),
+             static_cast<unsigned>(info.largest_free_block),
+             static_cast<unsigned>(info.total_allocated_bytes),
+             static_cast<unsigned>(info.free_blocks),
+             static_cast<unsigned>(info.total_blocks),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_DMA)),
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+}
+
+/**
+ * @brief Минимальный остаток стека одной задачи.
+ *
+ * Значение отражает минимум с момента запуска задачи. Единицы измерения
+ * берутся из документации ESP-IDF для uxTaskGetStackHighWaterMark2 и перед
+ * цитированием сверяются с заголовком v6.1.
+ */
+void logTaskStack(const char *when, const char *name, TaskHandle_t handle)
+{
+    if (handle == nullptr) {
+        ESP_LOGW(kTag, "stack[%s]: task %s not found", when, name);
+        return;
+    }
+    const auto free_units = uxTaskGetStackHighWaterMark2(handle);
+    ESP_LOGI(kTag, "stack[%s]: %-10s free=%u", when, name,
+             static_cast<unsigned>(free_units));
+}
+
+/**
+ * @brief Снимок стеков. Только при подтверждённом отсутствии движения.
+ *
+ * Две задачи осей имеют одинаковое имя "motor_axis", поэтому по имени их не
+ * различить: при включённом CONFIG_FREERTOS_USE_TRACE_FACILITY выводится
+ * перечисление задач. Ёмкость массива уменьшать нельзя: при нехватке места
+ * uxTaskGetSystemState вернёт 0, что считается ошибкой диагностики.
+ */
+void logStackSnapshotStopped(const char *when)
+{
+    // main измеряется напрямую из собственной задачи: поиск по имени не нужен.
+    logTaskStack(when, "main", nullptr);
+    logTaskStack(when, "joystick", xTaskGetHandle("joystick"));
+    logTaskStack(when, "control", xTaskGetHandle("control"));
+    logTaskStack(when, "wifi_ap", xTaskGetHandle("wifi_ap"));
+
+#if CONFIG_FREERTOS_USE_TRACE_FACILITY
+    constexpr UBaseType_t kTaskCapacity = 24;
+    TaskStatus_t tasks[kTaskCapacity]{};
+    const UBaseType_t count = uxTaskGetSystemState(tasks, kTaskCapacity, nullptr);
+    if (count == 0) {
+        ESP_LOGE(kTag, "stack[%s]: task enumeration failed", when);
+        return;
+    }
+    for (UBaseType_t i = 0; i < count; ++i) {
+        if (tasks[i].pcTaskName == nullptr) {
+            continue;
+        }
+        ESP_LOGI(kTag, "stack[%s]: %-12s state=%u free=%u", when,
+                 tasks[i].pcTaskName,
+                 static_cast<unsigned>(tasks[i].eCurrentState),
+                 static_cast<unsigned>(tasks[i].usStackHighWaterMark));
+    }
+    if (count == kTaskCapacity) {
+        ESP_LOGW(kTag, "stack[%s]: task list may be truncated", when);
+    }
+#else
+    ESP_LOGW(kTag,
+             "stack[%s]: axes not listed, enable CONFIG_FREERTOS_USE_TRACE_FACILITY",
+             when);
+#endif
+}
+
+/**
+ * @brief Точные размеры объектов на целевой ABI.
+ *
+ * Значения нужны для сверки бюджета main stack и .bss: host-размеры для
+ * Xtensa непригодны. Единицы — байты.
+ */
+void logObjectSizes()
+{
+    ESP_LOGI(kTag,
+             "sizeof: MotorService=%u JoystickService=%u ControlService=%u "
+             "StateHub=%u SystemSnapshot=%u AxisStatus=%u semaphore=%u",
+             static_cast<unsigned>(sizeof(motor_hal::MotorService)),
+             static_cast<unsigned>(sizeof(input_hal::JoystickService)),
+             static_cast<unsigned>(sizeof(control_hal::ControlService)),
+             static_cast<unsigned>(sizeof(state_hal::StateHub)),
+             static_cast<unsigned>(sizeof(state::SystemSnapshot)),
+             static_cast<unsigned>(sizeof(motion::AxisStatus)),
+             static_cast<unsigned>(sizeof(StaticSemaphore_t)));
+}
+
+#endif  // CONFIG_APP_MEMORY_DIAGNOSTICS
+
 #if CONFIG_APP_MOTOR_SELFTEST
 
 void runSelfTest(motor_hal::MotorService &service)
@@ -443,6 +556,13 @@ extern "C" void app_main(void)
         }
     }
 
+#if CONFIG_APP_MEMORY_DIAGNOSTICS
+    // Все службы запущены и движения нет: снимок стеков допустим только здесь.
+    logHeapSummary("boot");
+    logObjectSizes();
+    logStackSnapshotStopped("boot");
+#endif
+
     while (true) {
         ESP_LOGI(kTag, "heartbeat");
         logAxis(service, motion::AxisId::Azimuth);
@@ -451,6 +571,10 @@ extern "C" void app_main(void)
         logControl(control);
         logButtonStats(button_listener.stats());
         logAccessPoint(access_point.status());
+#if CONFIG_APP_MEMORY_DIAGNOSTICS
+        // Только чтение счётчиков: допустимо и во время движения.
+        logHeapSummary("periodic");
+#endif
         vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_STATUS_PERIOD_MS));
     }
 }
