@@ -105,6 +105,45 @@ ConfigError validate(const AccessPointSettings &settings) noexcept
     return ConfigError::None;
 }
 
+FieldMerge mergeSsid(AccessPointConfig &config, bool kconfig_valid,
+                     NvsValue value, const char *text) noexcept
+{
+    FieldMerge merge;
+    merge.kconfig_invalid = !kconfig_valid;
+    if (value != NvsValue::Present || text == nullptr) {
+        return merge;
+    }
+    if (validateSsid(text) != ConfigError::None) {
+        return merge;
+    }
+    if (!setSsid(config, text)) {
+        return merge;
+    }
+    merge.applied = true;
+    merge.kconfig_invalid = false;
+    return merge;
+}
+
+FieldMerge mergePassword(AccessPointConfig &config, bool kconfig_valid,
+                         NvsValue value, const char *text) noexcept
+{
+    FieldMerge merge;
+    merge.kconfig_invalid = !kconfig_valid;
+    if (value != NvsValue::Present || text == nullptr) {
+        return merge;
+    }
+    // Пустая строка допустима: открытая сеть.
+    if (validatePassword(text) != ConfigError::None) {
+        return merge;
+    }
+    if (!setPassword(config, text)) {
+        return merge;
+    }
+    merge.applied = true;
+    merge.kconfig_invalid = false;
+    return merge;
+}
+
 const char *errorName(ConfigError error) noexcept
 {
     switch (error) {

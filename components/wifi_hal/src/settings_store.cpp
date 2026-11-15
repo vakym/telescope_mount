@@ -1,6 +1,12 @@
 /**
  * @file settings_store.cpp
  * @brief Kconfig-значения по умолчанию и переопределение из NVS.
+ *
+ * Приоритет: валидный ключ NVS переопределяет Kconfig, отсутствующий ключ
+ * замещается Kconfig, невалидный игнорируется с предупреждением. Признак
+ * непригодного значения Kconfig (`KconfigInvalid`) снимается только
+ * успешным применением валидного значения NVS: невалидное сохранённое
+ * значение его не скрывает.
  */
 
 #include "wifi_hal/settings_store.hpp"
@@ -55,39 +61,21 @@ wifi::AccessPointSettings makeDefaults(FieldStatus &ssid_status,
     return settings;
 }
 
-/// Опорные настройки с заведомо валидными полями: позволяют проверить
-/// одно значение NVS независимо от остальных.
-wifi::AccessPointSettings makeProbe() noexcept
+/// Неверный тип и неверная длина — испорченное сохранённое значение, а не
+/// ошибка чтения: поле замещается значением Kconfig.
+bool isInvalidValueError(esp_err_t error) noexcept
 {
-    wifi::AccessPointSettings probe;
-    (void)wifi::setSsid(probe.ap, "probe");
-    (void)wifi::setPassword(probe.ap, "12345678");
-    probe.ap.channel = wifi::kChannelMin;
-    probe.ap.max_stations = wifi::kMaxStationsMin;
-    return probe;
-}
-
-bool acceptableSsid(const char *value) noexcept
-{
-    wifi::AccessPointSettings probe = makeProbe();
-    if (!wifi::setSsid(probe.ap, value)) {
-        return false;
-    }
-    return wifi::validate(probe) == wifi::ConfigError::None;
-}
-
-bool acceptablePassword(const char *value) noexcept
-{
-    wifi::AccessPointSettings probe = makeProbe();
-    if (!wifi::setPassword(probe.ap, value)) {
-        return false;
-    }
-    return wifi::validate(probe) == wifi::ConfigError::None;
+    return error == ESP_ERR_NVS_TYPE_MISMATCH ||
+           error == ESP_ERR_NVS_INVALID_LENGTH;
 }
 
 void markInvalid(FieldStatus &status, LoadResult &result) noexcept
 {
-    status.issue = SettingIssue::InvalidValue;
+    // Невалидное значение NVS не скрывает, что исходное значение Kconfig
+    // непригодно: запуск в этом случае всё равно должен быть отвергнут.
+    if (status.issue != SettingIssue::KconfigInvalid) {
+        status.issue = SettingIssue::InvalidValue;
+    }
     result.any_invalid = true;
 }
 
@@ -102,14 +90,6 @@ void markReadError(FieldStatus &status, LoadResult &result,
     }
 }
 
-/// Неверный тип и неверная длина — это испорченное сохранённое значение,
-/// а не ошибка чтения: поле замещается значением Kconfig.
-bool isInvalidValueError(esp_err_t error) noexcept
-{
-    return error == ESP_ERR_NVS_TYPE_MISMATCH ||
-           error == ESP_ERR_NVS_INVALID_LENGTH;
-}
-
 void markAllReadError(LoadResult &result, esp_err_t error) noexcept
 {
     FieldStatus *fields[] = {&result.ssid,       &result.password,
@@ -120,96 +100,101 @@ void markAllReadError(LoadResult &result, esp_err_t error) noexcept
     }
 }
 
+/**
+ * @brief Читает строковое значение NVS.
+ *
+ * Возвращает три состояния: ключа нет, значение непригодно, значение
+ * прочитано. Реальная ошибка чтения возвращается через `read_error`.
+ */
+wifi::NvsValue readStringValue(nvs_handle_t handle, const char *key,
+                               char *buffer, std::size_t capacity,
+                               esp_err_t &read_error) noexcept
+{
+    read_error = ESP_OK;
+    std::size_t required = 0;
+    esp_err_t err = nvs_get_str(handle, key, nullptr, &required);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return wifi::NvsValue::Absent;
+    }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type", key);
+        return wifi::NvsValue::Invalid;
+    }
+    if (err != ESP_OK) {
+        read_error = err;
+        return wifi::NvsValue::Absent;
+    }
+    if (required == 0 || required > capacity) {
+        // Содержимое значения не логируется: это может быть пароль.
+        ESP_LOGW(kTag, "nvs key %s ignored: value does not fit", key);
+        return wifi::NvsValue::Invalid;
+    }
+    err = nvs_get_str(handle, key, buffer, &required);
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored value", key);
+        return wifi::NvsValue::Invalid;
+    }
+    if (err != ESP_OK) {
+        read_error = err;
+        return wifi::NvsValue::Absent;
+    }
+    return wifi::NvsValue::Present;
+}
+
+void applyStringMerge(const wifi::FieldMerge &merge, wifi::NvsValue value,
+                      FieldStatus &status, LoadResult &result) noexcept
+{
+    if (merge.applied) {
+        status.source = SettingSource::Nvs;
+        status.issue = SettingIssue::None;
+        return;
+    }
+    if (value == wifi::NvsValue::Invalid) {
+        result.any_invalid = true;
+    }
+    if (merge.kconfig_invalid) {
+        status.issue = SettingIssue::KconfigInvalid;
+    } else if (value == wifi::NvsValue::Invalid) {
+        status.issue = SettingIssue::InvalidValue;
+    }
+}
+
 bool readSsid(nvs_handle_t handle, wifi::AccessPointSettings &settings,
               FieldStatus &status, LoadResult &result) noexcept
 {
-    std::size_t required = 0;
-    esp_err_t err = nvs_get_str(handle, kKeySsid, nullptr, &required);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return false;
-    }
-    if (isInvalidValueError(err)) {
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type", kKeySsid);
-        markInvalid(status, result);
-        return false;
-    }
-    if (err != ESP_OK) {
-        markReadError(status, result, err);
-        return false;
-    }
-    if (required == 0 || required > wifi::kSsidCapacity) {
-        ESP_LOGW(kTag, "nvs key %s ignored: value does not fit", kKeySsid);
-        markInvalid(status, result);
-        return false;
-    }
     char buffer[wifi::kSsidCapacity]{};
-    err = nvs_get_str(handle, kKeySsid, buffer, &required);
-    if (isInvalidValueError(err)) {
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored value", kKeySsid);
-        markInvalid(status, result);
+    esp_err_t read_error = ESP_OK;
+    const wifi::NvsValue value = readStringValue(
+        handle, kKeySsid, buffer, wifi::kSsidCapacity, read_error);
+    if (read_error != ESP_OK) {
+        markReadError(status, result, read_error);
         return false;
     }
-    if (err != ESP_OK) {
-        markReadError(status, result, err);
-        return false;
-    }
-    if (!acceptableSsid(buffer)) {
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid value", kKeySsid);
-        markInvalid(status, result);
-        return false;
-    }
-    (void)wifi::setSsid(settings.ap, buffer);
-    status.source = SettingSource::Nvs;
-    status.issue = SettingIssue::None;
-    return true;
+
+    const bool kconfig_valid = status.issue != SettingIssue::KconfigInvalid;
+    const wifi::FieldMerge merge =
+        wifi::mergeSsid(settings.ap, kconfig_valid, value, buffer);
+    applyStringMerge(merge, value, status, result);
+    return merge.applied;
 }
 
 bool readPassword(nvs_handle_t handle, wifi::AccessPointSettings &settings,
                   FieldStatus &status, LoadResult &result) noexcept
 {
-    std::size_t required = 0;
-    esp_err_t err = nvs_get_str(handle, kKeyPassword, nullptr, &required);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return false;
-    }
-    if (isInvalidValueError(err)) {
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type",
-                 kKeyPassword);
-        markInvalid(status, result);
-        return false;
-    }
-    if (err != ESP_OK) {
-        markReadError(status, result, err);
-        return false;
-    }
-    if (required == 0 || required > wifi::kPasswordCapacity) {
-        // Значение не логируется: это пароль.
-        ESP_LOGW(kTag, "nvs key %s ignored: value does not fit", kKeyPassword);
-        markInvalid(status, result);
-        return false;
-    }
     char buffer[wifi::kPasswordCapacity]{};
-    err = nvs_get_str(handle, kKeyPassword, buffer, &required);
-    if (isInvalidValueError(err)) {
-        // Значение не логируется: это пароль.
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored value",
-                 kKeyPassword);
-        markInvalid(status, result);
+    esp_err_t read_error = ESP_OK;
+    const wifi::NvsValue value = readStringValue(
+        handle, kKeyPassword, buffer, wifi::kPasswordCapacity, read_error);
+    if (read_error != ESP_OK) {
+        markReadError(status, result, read_error);
         return false;
     }
-    if (err != ESP_OK) {
-        markReadError(status, result, err);
-        return false;
-    }
-    if (!acceptablePassword(buffer)) {
-        ESP_LOGW(kTag, "nvs key %s ignored: invalid value", kKeyPassword);
-        markInvalid(status, result);
-        return false;
-    }
-    (void)wifi::setPassword(settings.ap, buffer);
-    status.source = SettingSource::Nvs;
-    status.issue = SettingIssue::None;
-    return true;
+
+    const bool kconfig_valid = status.issue != SettingIssue::KconfigInvalid;
+    const wifi::FieldMerge merge =
+        wifi::mergePassword(settings.ap, kconfig_valid, value, buffer);
+    applyStringMerge(merge, value, status, result);
+    return merge.applied;
 }
 
 bool readChannel(nvs_handle_t handle, wifi::AccessPointSettings &settings,
@@ -237,6 +222,7 @@ bool readChannel(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     settings.ap.channel = value;
     status.source = SettingSource::Nvs;
+    status.issue = SettingIssue::None;
     return true;
 }
 
@@ -266,6 +252,7 @@ bool readMaxStations(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     settings.ap.max_stations = value;
     status.source = SettingSource::Nvs;
+    status.issue = SettingIssue::None;
     return true;
 }
 
@@ -295,6 +282,7 @@ bool readFlag(nvs_handle_t handle, const char *key, bool &destination,
     }
     destination = value == 1;
     status.source = SettingSource::Nvs;
+    status.issue = SettingIssue::None;
     return true;
 }
 

@@ -78,6 +78,7 @@ endforeach()
 
 foreach(test_name
         test_ap_config
+        test_ap_settings_merge
         test_toggle_admission
         test_ap_lifecycle)
     add_executable(${test_name} "${test_name}.cpp")

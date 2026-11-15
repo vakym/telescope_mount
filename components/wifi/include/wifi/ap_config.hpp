@@ -65,6 +65,37 @@ enum class ConfigError : std::uint8_t {
  */
 ConfigError validate(const AccessPointSettings &settings) noexcept;
 
+/// Происхождение значения поля из NVS.
+enum class NvsValue : std::uint8_t {
+    Absent,  ///< ключа нет — используется значение Kconfig
+    Invalid, ///< значение есть, но непригодно
+    Present, ///< значение есть и структурно корректно
+};
+
+/// Результат применения значения NVS к полю.
+struct FieldMerge {
+    bool applied = false;         ///< значение NVS применено
+    bool kconfig_invalid = false; ///< значение Kconfig непригодно
+};
+
+/**
+ * @brief Применяет значение NVS к SSID.
+ *
+ * Признак непригодного значения Kconfig снимается только после успешного
+ * применения валидного значения NVS: невалидное NVS его не скрывает.
+ */
+FieldMerge mergeSsid(AccessPointConfig &config, bool kconfig_valid,
+                     NvsValue value, const char *text) noexcept;
+
+/**
+ * @brief Применяет значение NVS к паролю.
+ *
+ * Пустая строка — намеренный выбор открытой сети и успешно переопределяет
+ * непригодное значение Kconfig.
+ */
+FieldMerge mergePassword(AccessPointConfig &config, bool kconfig_valid,
+                         NvsValue value, const char *text) noexcept;
+
 /// Имя ошибки для лога; для ConfigError::None возвращает "none".
 const char *errorName(ConfigError error) noexcept;
 
