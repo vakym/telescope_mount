@@ -265,6 +265,7 @@ esp_err_t ControlService::stop()
     if (lifecycle_ == Lifecycle::Running) {
         lifecycle_ = Lifecycle::Stopping;
         shutdown_requested_.store(true);
+        markRecoveryCancelledIfPending();  // отмена и успех согласованы
         if (task_ != nullptr) {
             (void)xTaskNotify(task_, kStopBit, eSetBits);
         }
@@ -334,6 +335,7 @@ esp_err_t ControlService::requestSafetyStop()
         return ESP_ERR_INVALID_STATE;
     }
     safety_stop_requested_.store(true);
+    markRecoveryCancelledIfPending();  // приоритет выше восстановления
     if (task_ != nullptr) {
         (void)xTaskNotify(task_, kStopBit, eSetBits);
     }
@@ -380,6 +382,7 @@ esp_err_t ControlService::acknowledgeFault(state::Micros timeout_us)
         recovery_.execution_busy = false;
         recovery_.result_unread = true;
         recovery_.result = ESP_OK;
+        recovery_cancel_requested_ = false;
     }
     (void)xSemaphoreGive(recovery_mutex_);
     if (id == 0U) {
@@ -510,6 +513,7 @@ void ControlService::run()
         recovery_.execution_busy = false;
         ++recovery_cancelled_;
     }
+    recovery_cancel_requested_ = false;
     (void)xSemaphoreGive(recovery_mutex_);
     if (recovery_done_ != nullptr) {
         (void)xSemaphoreGive(recovery_done_);
@@ -920,7 +924,7 @@ void ControlService::runRecovery()
         recovery_.request_id != request_id) {
         ++recovery_late_;
     } else if (interrupted || shutdown_requested_.load() ||
-               safety_stop_requested_.load()) {
+               safety_stop_requested_.load() || recovery_cancel_requested_) {
         // Приоритетный запрос, пришедший во время финализации, не даёт
         // зафиксировать успех: защёлка остаётся.
         recovery_.state = RecoveryState::Cancelled;
@@ -941,6 +945,7 @@ void ControlService::runRecovery()
         ++recovery_failed_;
     }
     recovery_.execution_busy = false;
+    recovery_cancel_requested_ = false;
     (void)xSemaphoreGive(recovery_mutex_);
 
     if (recovery_done_ != nullptr) {

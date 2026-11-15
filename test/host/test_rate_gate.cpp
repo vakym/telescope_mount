@@ -3,6 +3,8 @@
  * @brief Дедупликация уставок: нуль вытесняет ожидающую, дубли не теряются.
  */
 
+#include <initializer_list>
+
 #include "check.hpp"
 #include "control/rate_gate.hpp"
 
@@ -73,16 +75,56 @@ void signChangeIsSent()
     CHECK(reversed.value < 0.0F);
 }
 
-void generationResetsSlot()
+void generationResetsBothAxes()
 {
     control::RateGate gate;
     gate.configure({8.0F});
-    const auto first = gate.evaluate(AxisId::Azimuth, 100.0F, kGen);
-    gate.noteEnqueued(AxisId::Azimuth, first.value, kGen);
 
-    // Новое поколение: недоставленное прежнего владельца уничтожено.
-    const auto after = gate.evaluate(AxisId::Azimuth, 100.0F, kGen + 1);
-    CHECK(after.send);
+    // Поколение A: обе оси успешно поставлены.
+    for (const auto id : {AxisId::Azimuth, AxisId::Altitude}) {
+        const auto decision = gate.evaluate(id, 100.0F, kGen);
+        CHECK(decision.send);
+        gate.noteEnqueued(id, decision.value, kGen);
+    }
+    CHECK(!gate.evaluate(AxisId::Azimuth, 100.0F, kGen).send);
+    CHECK(!gate.evaluate(AxisId::Altitude, 100.0F, kGen).send);
+
+    // Поколение B: та же уставка обязана уйти ОБЕИМ осям.
+    const auto azimuth = gate.evaluate(AxisId::Azimuth, 100.0F, kGen + 1);
+    CHECK(azimuth.send);
+    const auto altitude = gate.evaluate(AxisId::Altitude, 100.0F, kGen + 1);
+    CHECK(altitude.send);
+}
+
+void generationResetsBothAxesReverseOrder()
+{
+    control::RateGate gate;
+    gate.configure({8.0F});
+    for (const auto id : {AxisId::Altitude, AxisId::Azimuth}) {
+        const auto decision = gate.evaluate(id, 100.0F, kGen);
+        gate.noteEnqueued(id, decision.value, kGen);
+    }
+
+    const auto altitude = gate.evaluate(AxisId::Altitude, 100.0F, kGen + 1);
+    CHECK(altitude.send);
+    const auto azimuth = gate.evaluate(AxisId::Azimuth, 100.0F, kGen + 1);
+    CHECK(azimuth.send);
+}
+
+void generationWithPartialFailure()
+{
+    control::RateGate gate;
+    gate.configure({8.0F});
+    const auto azimuth = gate.evaluate(AxisId::Azimuth, 100.0F, kGen);
+    gate.noteEnqueued(AxisId::Azimuth, azimuth.value, kGen);
+    const auto altitude = gate.evaluate(AxisId::Altitude, 100.0F, kGen);
+    CHECK(altitude.send);
+    gate.noteFailed(AxisId::Altitude);
+
+    const auto a2 = gate.evaluate(AxisId::Azimuth, 100.0F, kGen + 1);
+    CHECK(a2.send);
+    const auto b2 = gate.evaluate(AxisId::Altitude, 100.0F, kGen + 1);
+    CHECK(b2.send);
 }
 
 void axisIndependence()
@@ -123,7 +165,9 @@ int main()
     zeroWinsOverPending();
     pendingRepeatsCurrentValue();
     signChangeIsSent();
-    generationResetsSlot();
+    generationResetsBothAxes();
+    generationResetsBothAxesReverseOrder();
+    generationWithPartialFailure();
     axisIndependence();
     helpers();
     return TEST_RESULT();

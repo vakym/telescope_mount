@@ -26,9 +26,16 @@ void RateGate::configure(const Config &config) noexcept
 
 void RateGate::reset() noexcept
 {
+    resetSlots();
+    generation_ = 0;
+}
+
+void RateGate::resetSlots() noexcept
+{
+    // Поколение общее для гейта, поэтому при его смене сбрасываются ОБА слота:
+    // иначе вторая ось сочла бы прежнюю уставку дублем и осталась стоять.
     slots_[0] = Slot{};
     slots_[1] = Slot{};
-    generation_ = 0;
 }
 
 RateGate::Decision RateGate::evaluate(motion::AxisId id, float desired,
@@ -38,13 +45,13 @@ RateGate::Decision RateGate::evaluate(motion::AxisId id, float desired,
     if (id != motion::AxisId::Azimuth && id != motion::AxisId::Altitude) {
         return decision;
     }
-    Slot &slot = slots_[indexOf(id)];
-
-    // 1. Смена поколения уничтожает недоставленное прежнего владельца.
+    // 1. Смена поколения уничтожает недоставленное прежнего владельца
+    //    по обеим осям.
     if (generation != generation_) {
         generation_ = generation;
-        slot = Slot{};
+        resetSlots();
     }
+    Slot &slot = slots_[indexOf(id)];
 
     if (!std::isfinite(desired)) {
         return decision;
@@ -79,11 +86,15 @@ void RateGate::noteEnqueued(motion::AxisId id, float value,
     if (id != motion::AxisId::Azimuth && id != motion::AxisId::Altitude) {
         return;
     }
+    if (generation != generation_) {
+        // Команда другого поколения не должна оставлять старый слот второй оси.
+        generation_ = generation;
+        resetSlots();
+    }
     Slot &slot = slots_[indexOf(id)];
     slot.known = true;
     slot.pending = false;
     slot.value = value;
-    generation_ = generation;
 }
 
 void RateGate::noteFailed(motion::AxisId id) noexcept

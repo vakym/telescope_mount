@@ -49,6 +49,7 @@ private:
     };
 
     static std::size_t indexOf(motion::AxisId id) noexcept;
+    void resetSlots() noexcept;
 
     Config config_{};
     Slot slots_[2]{};

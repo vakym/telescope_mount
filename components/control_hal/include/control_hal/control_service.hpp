@@ -137,6 +137,8 @@ private:
     void unlockApi() const;
     void setLatch(state::LatchCode latch) noexcept;
     state::LatchCode latch() const noexcept;
+    /// Отмена восстановления под recovery_mutex_: только пока запрос Pending.
+    void markRecoveryCancelledIfPending() noexcept;
     bool axesHaveFault() const noexcept;
     bool axesReady() const noexcept;
     bool stoppedConfirmed() const noexcept;
@@ -174,6 +176,8 @@ private:
     std::atomic<bool> stop_failed_{false};
 
     RecoveryRecord recovery_{};
+    /// Защищён recovery_mutex_: согласует отмену с терминальным переходом.
+    bool recovery_cancel_requested_ = false;
     state::LatchCode latch_ = state::LatchCode::None;
     std::uint32_t next_recovery_id_ = 1;
 
