@@ -62,7 +62,8 @@ input::ButtonConfig makeButtonConfig() noexcept
 {
     return input::ButtonConfig{
         static_cast<std::uint32_t>(CONFIG_JOY_BUTTON_DEBOUNCE_MS),
-        static_cast<std::uint32_t>(CONFIG_JOY_BUTTON_LONG_PRESS_MS)};
+        static_cast<std::uint32_t>(CONFIG_JOY_BUTTON_LONG_PRESS_MS),
+        static_cast<std::uint32_t>(CONFIG_JOY_DOUBLE_CLICK_MS)};
 }
 
 }  // namespace
@@ -337,6 +338,11 @@ bool JoystickService::calibrateCenters(input::JoystickConfig &config)
     while ((xTaskGetTickCount() - started) < timeout) {
         if (xTaskDelayUntil(&last_wake, period) == pdFALSE) {
             last_wake = xTaskGetTickCount();
+        }
+        // Ожидание могло выйти за timeout: новые отсчёты после истечения
+        // срока не читаются и не принимаются.
+        if ((xTaskGetTickCount() - started) >= timeout) {
+            break;
         }
 
         const input::RawSample raw = adc_.read();

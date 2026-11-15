@@ -158,7 +158,8 @@ void buttonIndependentFromAdc()
     gate.configure({5, 5});
 
     input::ButtonDebouncer button;
-    button.configure({40, 1000});
+    // Явный режим совместимости: Click выдаётся сразу вместе с Released.
+    button.configure({40, 1000, 0});
     button.reset(false, 0);
 
     ButtonEvent recorded[4]{};

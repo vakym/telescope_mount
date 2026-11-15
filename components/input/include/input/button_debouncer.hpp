@@ -1,6 +1,12 @@
 /**
  * @file button_debouncer.hpp
- * @brief Антидребезг кнопки и формирование событий.
+ * @brief Антидребезг кнопки, одиночный и двойной клик.
+ *
+ * Окно двойного нажатия включательное: второе подтверждённое нажатие
+ * засчитывается при `elapsed <= double_click_ms`. Одиночный `Click`
+ * откладывается до истечения окна, поэтому потребитель никогда не получает
+ * `Click` и `DoubleClick` за один жест. При `double_click_ms == 0` режим
+ * выключен и `Click` выдаётся сразу вместе с `Released`.
  */
 
 #pragma once
@@ -12,6 +18,8 @@ namespace input {
 struct ButtonConfig {
     std::uint32_t debounce_ms = 40;
     std::uint32_t long_press_ms = 1000;
+    /// Окно двойного нажатия, 0 — режим выключен.
+    std::uint32_t double_click_ms = 350;
 };
 
 enum class ButtonEvent : std::uint8_t {
@@ -20,6 +28,9 @@ enum class ButtonEvent : std::uint8_t {
     Released,
     Click,
     LongPress,
+    /// Добавлено после LongPress: числовые значения прежних событий
+    /// не сдвигаются.
+    DoubleClick,
 };
 
 /// До двух событий за один вызов, без динамической памяти.
@@ -42,7 +53,11 @@ public:
 
 class ButtonDebouncer {
 public:
-    /// true, если debounce_ms > 0 и long_press_ms > 0.
+    /**
+     * true, если debounce_ms > 0, long_press_ms > 0, а double_click_ms
+     * равно нулю или не меньше debounce_ms: окно короче антидребезга не
+     * позволяет распознать второе нажатие.
+     */
     bool isValid(const ButtonConfig &config) noexcept;
 
     /// false = конфигурация отвергнута; значения по умолчанию не подставляются.
@@ -64,8 +79,13 @@ private:
     bool raw_pressed_ = false;
     bool press_trusted_ = false;
     bool long_sent_ = false;
+    /// Одиночный клик отложен до истечения окна double_click_ms.
+    bool pending_click_ = false;
+    /// Текущее нажатие — второе в окне, кандидат на DoubleClick.
+    bool second_press_ = false;
     std::uint32_t raw_since_ms_ = 0;
     std::uint32_t press_started_ms_ = 0;
+    std::uint32_t pending_since_ms_ = 0;
 };
 
 }  // namespace input

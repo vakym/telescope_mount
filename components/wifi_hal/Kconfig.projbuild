@@ -1,0 +1,83 @@
+menu "Telescope mount WiFi"
+
+    config WIFI_AP_SSID
+        string "Access point SSID"
+        default "mount_01"
+        help
+            Имя сети точки доступа. Валидный ключ ssid в NVS переопределяет
+            это значение.
+
+    config WIFI_AP_PASSWORD
+        string "Access point password"
+        default "12345678"
+        help
+            Тестовый пароль WPA2-PSK: подлежит смене перед эксплуатацией.
+            Пустая строка — открытая сеть; 8-63 печатных символа ASCII.
+            Пароль длиной 1-7 символов отвергается при запуске.
+
+    config WIFI_AP_START_ON_BOOT
+        bool "Start access point at boot"
+        default y
+        help
+            Поднимать точку доступа при включении. При выключенном значении
+            драйвер инициализируется, но радио остаётся выключенным; точка
+            доступа включается двойным нажатием кнопки.
+
+    config WIFI_AP_CHANNEL
+        int "Access point channel"
+        range 1 11
+        default 1
+        help
+            Канал 1-11: world-safe диапазон без настройки country. Каналы
+            12-13 отложены до явной настройки страны.
+
+    config WIFI_AP_MAX_STATIONS
+        int "Maximum connected stations"
+        range 1 4
+        default 1
+
+    config WIFI_AP_HIDDEN
+        bool "Hide SSID"
+        default n
+
+    config WIFI_AP_EVENT_TIMEOUT_MS
+        int "Access point event confirmation timeout (ms)"
+        range 500 20000
+        default 5000
+        help
+            Ожидание событий WIFI_EVENT_AP_START и WIFI_EVENT_AP_STOP.
+            Таймаут означает отсутствие подтверждения: состояние становится
+            Unknown и разрешается ресинхронизацией.
+
+    config WIFI_SETTINGS_FROM_NVS
+        bool "Load access point settings from NVS"
+        default y
+        help
+            Разрешить переопределение настроек из namespace wifi. Значение
+            выключается только для проверки Kconfig-значений на стенде.
+
+    config WIFI_TASK_STACK
+        int "WiFi control task stack size (bytes)"
+        range 2048 8192
+        default 3584
+
+    config WIFI_TASK_PRIORITY
+        int "WiFi control task priority"
+        range 1 15
+        default 4
+
+    config WIFI_TASK_CORE
+        int "WiFi control task core"
+        range 0 1
+        default 0
+
+    config WIFI_STOP_TIMEOUT_MS
+        int "Stop confirmation timeout (ms)"
+        range 1000 30000
+        default 5000
+        help
+            Ограничивает только ожидание вызывающего в stop(). Teardown
+            может занять больше: тогда stop() возвращает ESP_ERR_TIMEOUT,
+            ресурсы сохраняются, повторный stop() доводит финализацию.
+
+endmenu

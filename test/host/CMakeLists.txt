@@ -4,8 +4,8 @@
 #   cmake --build build-host
 #   ctest --test-dir build-host --output-on-failure
 #
-# Компоненты motion и input подключаются исходниками: они не зависят от
-# ESP-IDF.
+# Компоненты motion, input и wifi подключаются исходниками: они не зависят
+# от ESP-IDF.
 
 cmake_minimum_required(VERSION 3.16)
 project(telescope_mount_host_tests LANGUAGES CXX)
@@ -19,6 +19,7 @@ option(ENABLE_SANITIZERS "Build tests with AddressSanitizer and UBSan" OFF)
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(MOTION_DIR "${REPO_ROOT}/components/motion")
 set(INPUT_DIR "${REPO_ROOT}/components/input")
+set(WIFI_DIR "${REPO_ROOT}/components/wifi")
 
 add_library(motion_host STATIC
     "${MOTION_DIR}/src/axis_config.cpp"
@@ -38,6 +39,14 @@ add_library(input_host STATIC
 )
 target_include_directories(input_host PUBLIC "${INPUT_DIR}/include")
 target_compile_options(input_host PRIVATE -Wall -Wextra -Werror)
+
+add_library(wifi_host STATIC
+    "${WIFI_DIR}/src/ap_config.cpp"
+    "${WIFI_DIR}/src/toggle_admission.cpp"
+    "${WIFI_DIR}/src/ap_lifecycle.cpp"
+)
+target_include_directories(wifi_host PUBLIC "${WIFI_DIR}/include")
+target_compile_options(wifi_host PRIVATE -Wall -Wextra -Werror)
 
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -63,6 +72,16 @@ foreach(test_name
         test_button_debouncer)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE input_host)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+foreach(test_name
+        test_ap_config
+        test_toggle_admission
+        test_ap_lifecycle)
+    add_executable(${test_name} "${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE wifi_host)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()

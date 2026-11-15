@@ -109,6 +109,16 @@ menu "Telescope mount joystick"
         range 1 60000
         default 1000
 
+    config JOY_DOUBLE_CLICK_MS
+        int "Double click window (ms)"
+        range 0 1000
+        default 350
+        help
+            Окно двойного нажатия. Значение 0 выключает режим: одиночный
+            Click выдаётся сразу вместе с Released, DoubleClick не
+            формируется. Ненулевое значение должно быть не меньше
+            периода антидребезга, иначе конфигурация отвергается.
+
     config JOY_STOP_TIMEOUT_MS
         int "Task stop confirmation timeout (ms)"
         range 10 10000
