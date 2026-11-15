@@ -111,6 +111,20 @@ void generationResetsBothAxesReverseOrder()
     CHECK(azimuth.send);
 }
 
+void noteEnqueuedWithoutEvaluate()
+{
+    control::RateGate gate;
+    gate.configure({8.0F});
+    gate.noteEnqueued(AxisId::Azimuth, 100.0F, kGen);
+    gate.noteEnqueued(AxisId::Altitude, 100.0F, kGen);
+
+    // Первым в новом поколении идёт noteEnqueued: он обязан инвалидировать
+    // слот второй оси, а не оставить в нём прежнюю уставку.
+    gate.noteEnqueued(AxisId::Azimuth, 100.0F, kGen + 1);
+    const auto altitude = gate.evaluate(AxisId::Altitude, 100.0F, kGen + 1);
+    CHECK(altitude.send);
+}
+
 void generationWithPartialFailure()
 {
     control::RateGate gate;
@@ -167,6 +181,7 @@ int main()
     signChangeIsSent();
     generationResetsBothAxes();
     generationResetsBothAxesReverseOrder();
+    noteEnqueuedWithoutEvaluate();
     generationWithPartialFailure();
     axisIndependence();
     helpers();

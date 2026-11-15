@@ -116,6 +116,21 @@ state::LatchCode ControlService::latch() const noexcept
     return value;
 }
 
+void ControlService::markRecoveryCancelledIfPending() noexcept
+{
+    if (recovery_mutex_ == nullptr) {
+        return;
+    }
+    // Короткая критическая секция: согласует отмену с терминальным переходом
+    // финализатора. Порт не вызывается, семафоры не ожидаются, execution_busy
+    // не изменяется, уже зафиксированный результат не переписывается.
+    (void)xSemaphoreTake(recovery_mutex_, portMAX_DELAY);
+    if (recovery_.state == RecoveryState::Pending) {
+        recovery_cancel_requested_ = true;
+    }
+    (void)xSemaphoreGive(recovery_mutex_);
+}
+
 bool ControlService::axesHaveFault() const noexcept
 {
     for (std::size_t i = 0; i < 2; ++i) {
