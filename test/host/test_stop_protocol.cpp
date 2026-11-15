@@ -114,7 +114,7 @@ void releasedAxisNeedsTicket()
     CHECK(protocol.check(obs, 200) == StopProtocol::Decision::Pending);
 }
 
-void disabledAxisConfirmsWithoutTicket()
+void disabledAxisStillNeedsTicket()
 {
     StopProtocol protocol = makeProtocol();
     beginSmooth(protocol, 100);
@@ -123,11 +123,34 @@ void disabledAxisConfirmsWithoutTicket()
     disabled.state = AxisState::Disabled;
     disabled.energized = false;
     disabled.rate_steps_s = 0.0F;
+    disabled.command_epoch = kEpoch;
+    disabled.last_applied_command_id = 0;  // ack отправленного останова ещё нет
     CHECK(StopProtocol::axisCannotMove(disabled));
 
     StopObservation obs[2]{};
     obs[0].status = disabled;
     obs[1].status = disabled;
+    obs[0].polled_us = 200;
+    obs[1].polled_us = 200;
+    CHECK(protocol.check(obs, 200) == StopProtocol::Decision::Pending);
+}
+
+void disabledAxisConfirmsWithTicket()
+{
+    StopProtocol protocol = makeProtocol();
+    beginSmooth(protocol, 100);
+
+    motion::AxisStatus disabled{};
+    disabled.state = AxisState::Disabled;
+    disabled.energized = false;
+    disabled.rate_steps_s = 0.0F;
+    disabled.command_epoch = kEpoch;
+    disabled.last_applied_command_id = 10;
+
+    StopObservation obs[2]{};
+    obs[0].status = disabled;
+    obs[1].status = disabled;
+    obs[1].status.last_applied_command_id = 11;
     obs[0].polled_us = 200;
     obs[1].polled_us = 200;
     CHECK(protocol.check(obs, 200) == StopProtocol::Decision::Confirmed);
@@ -201,7 +224,8 @@ int main()
     staleRestIsNotConfirmation();
     mismatchedTicketIsNotConfirmation();
     releasedAxisNeedsTicket();
-    disabledAxisConfirmsWithoutTicket();
+    disabledAxisStillNeedsTicket();
+    disabledAxisConfirmsWithTicket();
     escalationSequence();
     immediateConfirmsByTicket();
     failedDeliveryRetries();

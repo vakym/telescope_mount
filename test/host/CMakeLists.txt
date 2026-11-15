@@ -62,6 +62,7 @@ target_compile_options(state_host PRIVATE -Wall -Wextra -Werror)
 # поэтому control_host тестируется с fake-портом исполнения.
 add_library(control_host STATIC
     "${CONTROL_DIR}/src/joy_mapping.cpp"
+    "${CONTROL_DIR}/src/joy_observation.cpp"
     "${CONTROL_DIR}/src/input_grace.cpp"
     "${CONTROL_DIR}/src/rate_gate.cpp"
     "${CONTROL_DIR}/src/stop_protocol.cpp"
@@ -121,6 +122,8 @@ foreach(test_name
         test_stop_protocol
         test_rate_gate
         test_input_grace
+        test_joy_observation
+        test_rate_starvation
         test_axis_command_ack)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE control_host)

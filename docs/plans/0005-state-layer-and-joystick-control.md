@@ -1733,6 +1733,7 @@ struct FakeTime { state::Micros now = 0; void advance(state::Micros dt) { now +=
 | 2026-11-15 | Редакция 9 утверждена владельцем проекта, начата реализация | решение владельца |
 | 2026-11-15 | Созданы компоненты `state`, `state_hal`, `control`, `control_hal`; в `motion`/`motor_hal` добавлены тикет, эпоха, `CommandReceipt`, слот emergency-id и публикация ack; `main` связывает службу и передаёт владение после self-test | код в рабочем дереве, ревью не проводилось |
 | 2026-11-15 | Написаны host-тесты: `test_state_health`, `test_joy_mapping`, `test_arbiter`, `test_intent_inbox`, `test_arming`, `test_stop_protocol`, `test_rate_gate`, `test_input_grace`, `test_axis_command_ack`; `fakes::FakeSource` получил канал emergency-id, `test_axis_executor` обновлён под новый контракт | `cmake --build build-host` и `ctest`: **20 из 20 тестов пройдено** |
+| 2026-11-15 | Статическое ревью реализации: исправлены 6 P1 и 1 P2. (1) локальный снимок джойстика теперь строится через `control::makeObservation` с `meta.valid = true`; (2) завершённый `StopProtocol` сбрасывается в `driveLoop` после того, как автомат потребил терминальный исход; (3) `axisConfirmed` выполняет обязательные проверки тикета/времени/эпохи и только потом `axisAtRest || axisCannotMove`; (4) `ResetFault` подтверждается только связкой «принятый тикет + совпавшие id/эпоха + свежий `Disabled && !fault && !energized`»; (5) `requestSafetyStop()` и `stop()` отменяют восстановление между шагами и перед фиксацией успеха; (6) потеря готовности оси в `Active`/`Enabling` даёт защёлку `DeliveryFailed` и останов пары; (7) при handover претендент сохраняется до `revalidateClaim`, отмена — только если передача не состоялась | добавлены `test_joy_observation` и `test_rate_starvation`, `test_stop_protocol` переведён на отрицательную проверку `Disabled` без тикета; `ctest`: **22 из 22 тестов пройдено** |
 | 2026-11-15 | `idf.py build` | **не выполнялся**: `idf.py` отсутствует в PATH, `IDF_PATH` не задан |
 | 2026-11-15 | Стендовый протокол (раздел 15) | **не выполнялся** |
 
@@ -1749,8 +1750,9 @@ struct FakeTime { state::Micros now = 0; void advance(state::Micros dt) { now +=
 
 | Пункт плана | Состояние |
 |---|---|
-| `test_rate_starvation` (модель планировщика на матрице конфигураций) | не написан |
-| `test_external_intents` (повтор при `Busy`) | не написан |
+| `test_rate_starvation` (модель планировщика, пол минимальной скорости) | написан: 4 сценария, включая голодание при частых уставках ниже пола |
+| `test_joy_observation` (наблюдение → `convert()` → `Enabling`) | написан: регрессия на `meta.valid` |
+| `test_external_intents` (повтор при `Busy`) | не написан: класс требует FreeRTOS-очереди |
 | `test_axis_motor` (регрессия перезапуска службы, `compare_exchange` слота) | не написан |
 | `test_recovery` (таймаут/поздний результат восстановления) | не написан |
 | расширение `test_axis_planner` (поле `id` как результат) | не написано |

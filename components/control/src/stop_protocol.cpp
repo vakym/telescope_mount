@@ -120,23 +120,24 @@ bool StopProtocol::axisConfirmed(const StopObservation &obs,
     if (axis > 1) {
         return false;
     }
-    // Ось, которая физически не может двигаться, подтверждается без тикета.
-    if (axisCannotMove(obs.status)) {
-        return true;
-    }
+    // Обязательные проверки выполняются ВСЕГДА: тикет, время опроса и эпоха.
+    // axisCannotMove лишь заменяет требование «покой», но не отменяет
+    // подтверждение обработки конкретного останова.
     if (!sent_[axis] || !ticket_[axis].valid()) {
         return false;
     }
     if (obs.polled_us <= requested_us_) {
         return false;  // снимок прочитан до запроса останова
     }
-    if (obs.status.command_epoch != ticket_[axis].epoch) {
+    if (baseline_epoch_[axis] == 0U ||
+        obs.status.command_epoch != baseline_epoch_[axis] ||
+        obs.status.command_epoch != ticket_[axis].epoch) {
         return false;
     }
     if (obs.status.last_applied_command_id != ticket_[axis].id) {
         return false;
     }
-    return axisAtRest(obs.status);
+    return axisAtRest(obs.status) || axisCannotMove(obs.status);
 }
 
 StopProtocol::Decision StopProtocol::check(const StopObservation (&obs)[2],

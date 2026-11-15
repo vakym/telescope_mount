@@ -7,6 +7,7 @@
 idf_component_register(
     SRCS
         "src/joy_mapping.cpp"
+        "src/joy_observation.cpp"
         "src/input_grace.cpp"
         "src/rate_gate.cpp"
         "src/stop_protocol.cpp"

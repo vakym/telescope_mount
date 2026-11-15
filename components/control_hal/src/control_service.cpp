@@ -7,6 +7,7 @@
 
 #include <cstddef>
 
+#include "control/joy_observation.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
@@ -40,21 +41,21 @@ bool restOrCannotMove(const motion::AxisStatus &status) noexcept
            control::StopProtocol::axisAtRest(status);
 }
 
-state::JoystickObservation makeJoystickObservation(
-    const input_hal::JoystickStatus &status, Micros polled_us) noexcept
+/// Перенос полей статуса сервиса в чистый вход построителя наблюдения.
+control::JoystickSnapshotInput toSnapshotInput(
+    const input_hal::JoystickStatus &status) noexcept
 {
-    state::JoystickObservation obs{};
-    obs.meta.measured_us = status.last_valid_us;
-    obs.meta.polled_us = polled_us;
-    obs.calibrated = status.calibrated;
-    obs.sample_valid = status.sample_valid;
-    obs.output_valid = status.output_valid;
-    obs.read_fault = status.read_fault;
-    obs.neutral = status.neutral;
-    obs.stick = status.stick;
-    obs.raw = status.raw;
-    obs.read_errors = status.read_errors;
-    return obs;
+    control::JoystickSnapshotInput input{};
+    input.calibrated = status.calibrated;
+    input.sample_valid = status.sample_valid;
+    input.output_valid = status.output_valid;
+    input.read_fault = status.read_fault;
+    input.neutral = status.neutral;
+    input.stick = status.stick;
+    input.raw = status.raw;
+    input.measured_us = status.last_valid_us;
+    input.read_errors = status.read_errors;
+    return input;
 }
 
 }  // namespace
@@ -529,7 +530,9 @@ void ControlService::pollInputs(Micros now)
         axis_[i] = port_.status(id);
         hub_.publishAxis(id, axis_[i], axis_polled_[i], axis_read_failures_[i]);
     }
-    joystick_obs_ = makeJoystickObservation(joystick_.status(), now);
+    // meta.valid выставляет построитель: без него convert() вернёт NoSample,
+    // хотя хаб уже публикует снимок.
+    joystick_obs_ = control::makeObservation(toSnapshotInput(joystick_.status()), now);
     hub_.publishJoystick(joystick_obs_);
 }
 
@@ -711,7 +714,16 @@ void ControlService::executeStop(Micros now)
 
 void ControlService::driveLoop(Micros now)
 {
-    (void)now;
+    // Терминальный исход протокола потреблён автоматом: завершаем жизненный
+    // цикл, иначе подтверждённый протокол навсегда заблокирует уставки.
+    if (stop_protocol_.active() &&
+        (stop_protocol_.confirmed() || stop_failed_flag_) &&
+        arming_.phase() != state::ControlPhase::Stopping) {
+        stop_protocol_.reset();
+        stop_failed_flag_ = false;
+        stop_confirmed_flag_ = false;
+    }
+
     const control::ArbitratedSetpoint setpoint = arbiter_.arbitrate(nowUs());
 
     control::ArmingInputs inputs{};
@@ -723,6 +735,11 @@ void ControlService::driveLoop(Micros now)
     inputs.input_usable = input_usable_;
     inputs.motor_fault = axesHaveFault();
     inputs.axes_ready = axesReady();
+    // Потеря готовности уже разрешённой оси: останов пары и защёлка.
+    // В фазе Enabling готовности ещё нет по определению — там работает
+    // отдельный счётчик отказов доставки Enable.
+    inputs.axis_lost = !inputs.axes_ready &&
+                       arming_.phase() == state::ControlPhase::Active;
     inputs.enable_failed = enable_failures_[0] >= CONFIG_CTRL_DELIVERY_FAILURE_LIMIT ||
                            enable_failures_[1] >= CONFIG_CTRL_DELIVERY_FAILURE_LIMIT;
     inputs.rate_delivery_failed =
@@ -744,7 +761,10 @@ void ControlService::driveLoop(Micros now)
 
     if (decision.revoke_ownership) {
         arbiter_.release(arbiter_.owner(), nowUs());
-        arbiter_.cancelHandover();
+        // При передаче владения претендент сохраняется до revalidateClaim.
+        if (decision.stop_reason != control::StopReason::Handover) {
+            arbiter_.cancelHandover();
+        }
     }
 
     if (decision.request_stop && !stop_protocol_.active()) {
@@ -794,6 +814,10 @@ void ControlService::driveLoop(Micros now)
 
     if (decision.handover_complete) {
         arbiter_.completeHandover(nowUs());
+    } else if (arbiter_.handoverPending() &&
+               arming_.phase() != state::ControlPhase::Stopping) {
+        // Передача не состоялась: претендент отклонён или протокол прерван.
+        arbiter_.cancelHandover();
     }
 }
 
@@ -830,7 +854,8 @@ void ControlService::runRecovery()
 
     bool interrupted = false;
     while (nowUs() < deadline) {
-        if (shutdown_requested_.load()) {
+        // Приоритетные запросы отменяют восстановление между шагами.
+        if (shutdown_requested_.load() || safety_stop_requested_.load()) {
             interrupted = true;
             break;
         }
@@ -849,21 +874,28 @@ void ControlService::runRecovery()
             continue;
         }
 
+        const Micros reset_sent_us = nowUs();
         const control::Delivery faults[2] = {port_.resetFault(motion::AxisId::Azimuth),
                                              port_.resetFault(motion::AxisId::Altitude)};
         bool reset_ok = true;
         while (nowUs() < deadline) {
+            if (shutdown_requested_.load() || safety_stop_requested_.load()) {
+                interrupted = true;
+                break;
+            }
             pollInputs(nowUs());
             bool confirmed = true;
             for (std::size_t i = 0; i < 2; ++i) {
                 const motion::AxisStatus &status = axis_[i];
-                const bool matched =
-                    faults[i].accepted && faults[i].ticket.valid() &&
-                    status.command_epoch == faults[i].ticket.epoch &&
-                    status.last_applied_command_id == faults[i].ticket.id;
+                // Совпавший ack доказывает только обработку команды, но не
+                // успешный сброс; нужен ещё свежий статус без fault.
+                const bool matched = faults[i].accepted && faults[i].ticket.valid() &&
+                                     status.command_epoch == faults[i].ticket.epoch &&
+                                     status.last_applied_command_id == faults[i].ticket.id;
                 const bool disabled = status.state == motion::AxisState::Disabled &&
                                       !status.has_fault && !status.energized;
-                if (!matched && !disabled) {
+                const bool fresh = axis_polled_[i] > reset_sent_us;
+                if (!(matched && disabled && fresh)) {
                     confirmed = false;
                     break;
                 }
@@ -887,7 +919,10 @@ void ControlService::runRecovery()
     if (recovery_.state != RecoveryState::Pending ||
         recovery_.request_id != request_id) {
         ++recovery_late_;
-    } else if (interrupted) {
+    } else if (interrupted || shutdown_requested_.load() ||
+               safety_stop_requested_.load()) {
+        // Приоритетный запрос, пришедший во время финализации, не даёт
+        // зафиксировать успех: защёлка остаётся.
         recovery_.state = RecoveryState::Cancelled;
         recovery_.result = ESP_ERR_INVALID_STATE;
         ++recovery_cancelled_;

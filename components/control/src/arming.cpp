@@ -55,7 +55,8 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
     if (latch_ == state::LatchCode::None) {
         if (in.motor_fault) {
             latch_ = state::LatchCode::MotorFault;
-        } else if (in.rate_delivery_failed) {
+        } else if (in.axis_lost || in.rate_delivery_failed) {
+            // Потеря готовности оси не должна оставлять вторую ось в движении.
             latch_ = state::LatchCode::DeliveryFailed;
         }
     }

@@ -31,6 +31,8 @@ struct ArmingInputs {
     bool input_usable = false;       ///< уставки формируются (ok или grace)
     bool motor_fault = false;        ///< Fault хотя бы одной оси
     bool axes_ready = false;         ///< свежий опрос: нет Fault и не Disabled
+    /// Ось перестала быть готовой уже после разрешения (Disabled/Fault).
+    bool axis_lost = false;
     bool enable_failed = false;      ///< доставка Enable исчерпала попытки
     bool rate_delivery_failed = false;
     bool stop_requested = false;  ///< safety stop или shutdown
