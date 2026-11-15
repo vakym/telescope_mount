@@ -6,6 +6,7 @@
 #include "motor_hal/axis_motor.hpp"
 
 #include <algorithm>
+#include <limits>
 
 #include "esp_attr.h"
 #include "esp_check.h"
@@ -91,9 +92,13 @@ esp_err_t AxisMotor::start(motion::AxisPlanner &planner,
         return err;
     }
 
+    ++epoch_;                    // новая эпоха: прежние тикеты недействительны
+    pending_emergency_id_.store(0, std::memory_order_release);
+
     motion::AxisExecutor::Params params{};
     params.watchdog_us = CONFIG_MOTOR_EVENT_WATCHDOG_US;
     params.command_budget = CONFIG_MOTOR_CMD_BUDGET_PER_ITERATION;
+    params.command_epoch = epoch_;
     executor_.emplace(planner, clock_, coil_, *this, params);
 
     queue_ = xQueueCreate(CONFIG_MOTOR_CMD_QUEUE_LEN, sizeof(motion::AxisCommand));
@@ -185,33 +190,75 @@ void AxisMotor::cleanupResources()
     executor_.reset();
 }
 
-bool AxisMotor::post(const motion::AxisCommand &cmd)
+std::uint64_t AxisMotor::nextId() noexcept
 {
-    if (api_mutex_ == nullptr) {
-        return false;
+    if (next_id_ == 0U || next_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        return 0;  // исчерпание: идентификаторы не переиспользуются
     }
-    (void)xSemaphoreTake(api_mutex_, portMAX_DELAY);
-    bool queued = false;
-    if (lifecycle_ == Lifecycle::Running && queue_ != nullptr && task_handle_ != nullptr) {
-        queued = (xQueueSend(queue_, &cmd, 0) == pdTRUE) &&
-                 (xTaskNotify(task_handle_, motion::CommandPending, eSetBits) == pdPASS);
-    }
-    (void)xSemaphoreGive(api_mutex_);
-    return queued;
+    return next_id_++;
 }
 
-bool AxisMotor::emergencyStop()
+CommandReceipt AxisMotor::post(motion::AxisCommand cmd)
 {
+    CommandReceipt receipt{};
     if (api_mutex_ == nullptr) {
-        return false;
+        return receipt;
     }
     (void)xSemaphoreTake(api_mutex_, portMAX_DELAY);
-    bool notified = false;
-    if (lifecycle_ == Lifecycle::Running && task_handle_ != nullptr) {
-        notified = (xTaskNotify(task_handle_, motion::EmergencyStop, eSetBits) == pdPASS);
+    if (lifecycle_ == Lifecycle::Running && queue_ != nullptr && task_handle_ != nullptr) {
+        const std::uint64_t id = nextId();
+        if (id != 0U) {
+            cmd.id = id;  // входное значение поля игнорируется
+            if (xQueueSend(queue_, &cmd, 0) == pdTRUE) {
+                receipt.accepted = true;
+                receipt.command_id = id;
+                receipt.epoch = epoch_;
+                receipt.notified =
+                    (xTaskNotify(task_handle_, motion::CommandPending, eSetBits) == pdPASS);
+                if (!receipt.notified) {
+                    notify_failures_.fetch_add(1, std::memory_order_relaxed);
+                }
+            }
+        }
     }
     (void)xSemaphoreGive(api_mutex_);
-    return notified;
+    return receipt;
+}
+
+CommandReceipt AxisMotor::emergencyStop()
+{
+    CommandReceipt receipt{};
+    if (api_mutex_ == nullptr) {
+        return receipt;
+    }
+    (void)xSemaphoreTake(api_mutex_, portMAX_DELAY);
+    if (lifecycle_ == Lifecycle::Running && task_handle_ != nullptr) {
+        const std::uint64_t id = nextId();
+        std::uint64_t expected = 0;
+        if (id != 0U &&
+            pending_emergency_id_.compare_exchange_strong(expected, id,
+                                                          std::memory_order_acq_rel,
+                                                          std::memory_order_acquire)) {
+            receipt.accepted = true;
+            receipt.command_id = id;
+            receipt.epoch = epoch_;
+            receipt.notified =
+                (xTaskNotify(task_handle_, motion::EmergencyStop, eSetBits) == pdPASS);
+            if (!receipt.notified) {
+                notify_failures_.fetch_add(1, std::memory_order_relaxed);
+            }
+        } else if (id != 0U) {
+            // Слот занят незабранным запросом: существующий не меняется.
+            emergency_slot_busy_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    (void)xSemaphoreGive(api_mutex_);
+    return receipt;
+}
+
+std::uint64_t AxisMotor::takeEmergencyId()
+{
+    return pending_emergency_id_.exchange(0, std::memory_order_acq_rel);
 }
 
 motion::AxisStatus AxisMotor::status() const

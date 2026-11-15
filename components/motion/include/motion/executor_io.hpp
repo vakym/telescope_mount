@@ -36,13 +36,21 @@ public:
     virtual bool isEnergized() const = 0;
 };
 
-/// Очередь команд оси.
+/// Очередь команд оси и канал приоритетного останова.
 class CommandSource {
 public:
     virtual ~CommandSource() = default;
     virtual std::size_t take(AxisCommand *out, std::size_t max_count) = 0;
     virtual bool empty() const = 0;
     virtual void clear() = 0;
+    /**
+     * @brief Атомарно забирает идентификатор ожидающего emergency-запроса.
+     *
+     * 0 означает «отслеживаемого запроса нет». Забирать нужно первым
+     * действием обработки останова, иначе подтверждается запрос, для
+     * которого очередь уже была очищена ранее.
+     */
+    virtual std::uint64_t takeEmergencyId() { return 0; }
 };
 
 }  // namespace motion

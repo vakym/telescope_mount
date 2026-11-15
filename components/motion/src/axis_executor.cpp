@@ -50,7 +50,7 @@ void AxisExecutor::onWakeup(std::uint32_t bits) noexcept
     const std::uint64_t now = alarm_.nowUs();
 
     if ((bits & EmergencyStop) != 0U) {
-        handleEmergency();
+        handleEmergency(bits);
         publish();
         return;
     }
@@ -77,8 +77,20 @@ void AxisExecutor::onWakeup(std::uint32_t bits) noexcept
     publish();
 }
 
-void AxisExecutor::handleEmergency() noexcept
+void AxisExecutor::handleEmergency(std::uint32_t bits) noexcept
 {
+    // Идентификатор забирается ПЕРВЫМ действием: подтверждать можно только
+    // тот запрос, для которого очистка очереди выполняется сейчас.
+    const std::uint64_t taken = source_.takeEmergencyId();
+    const bool shutdown = (bits & TaskExit) != 0U;
+
+    if (taken == 0U && !shutdown) {
+        // Бит без отслеживаемого запроса и без shutdown: повторная очистка
+        // FIFO не выполняется, фазы не снимаются, ack не выдаётся.
+        ++unmatched_emergency_notifications_;
+        return;
+    }
+
     alarm_.disarm();
     pending_deadline_us_ = 0;
     pending_interval_us_ = 0;
@@ -86,6 +98,11 @@ void AxisExecutor::handleEmergency() noexcept
     source_.clear();
     planner_.forceReleased(ReleaseReason::EmergencyStop);
     coil_.release();
+
+    // Служебный shutdown подтверждается завершением задачи, а не тикетом.
+    if (taken != 0U) {
+        last_applied_id_ = taken;
+    }
 }
 
 void AxisExecutor::handleCommands() noexcept
@@ -96,6 +113,10 @@ void AxisExecutor::handleCommands() noexcept
     const bool had_pending = planner_.hasPending();
 
     while (processed < params_.command_budget && source_.take(&cmd, 1U) == 1U) {
+        if (cmd.id != 0U) {
+            // Факт обработки фиксируется и для отклонённой команды.
+            last_applied_id_ = cmd.id;
+        }
         const std::uint32_t key_before = planner_.planKey();
         const motion::HoldPolicy policy_before = planner_.config().hold;
         const AxisState state_before = planner_.status().state;
@@ -404,6 +425,9 @@ void AxisExecutor::publish() noexcept
 {
     status_ = planner_.status();
     status_.energized = coil_.isEnergized();
+    status_.last_applied_command_id = last_applied_id_;
+    status_.command_epoch = params_.command_epoch;
+    status_.unmatched_emergency_notifications = unmatched_emergency_notifications_;
 }
 
 AxisStatus AxisExecutor::status() const noexcept

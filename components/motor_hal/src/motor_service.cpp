@@ -86,32 +86,40 @@ esp_err_t MotorService::stop()
     return result;
 }
 
-bool MotorService::enable(motion::AxisId id)
+CommandReceipt MotorService::enable(motion::AxisId id)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::enable());
+    if (!valid(id)) {
+        return CommandReceipt{};
+    }
+    return motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::enable());
 }
 
 bool MotorService::disable(motion::AxisId id)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::disable());
+    return valid(id) &&
+           motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::disable()).accepted;
 }
 
-bool MotorService::setTargetRate(motion::AxisId id, float half_steps_per_s)
+CommandReceipt MotorService::setTargetRate(motion::AxisId id, float half_steps_per_s)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(
-                            motion::AxisCommand::setTargetRate(half_steps_per_s));
+    if (!valid(id)) {
+        return CommandReceipt{};
+    }
+    return motors_[static_cast<std::size_t>(id)].post(
+        motion::AxisCommand::setTargetRate(half_steps_per_s));
 }
 
 bool MotorService::moveSteps(motion::AxisId id, std::int64_t half_steps)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(
-                            motion::AxisCommand::moveSteps(half_steps));
+    return valid(id) &&
+           motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::moveSteps(half_steps))
+               .accepted;
 }
 
-bool MotorService::stopAxis(motion::AxisId id, motion::StopMode mode)
+CommandReceipt MotorService::stopAxis(motion::AxisId id, motion::StopMode mode)
 {
     if (!valid(id)) {
-        return false;
+        return CommandReceipt{};
     }
     if (mode == motion::StopMode::Immediate) {
         return motors_[static_cast<std::size_t>(id)].emergencyStop();
@@ -119,39 +127,54 @@ bool MotorService::stopAxis(motion::AxisId id, motion::StopMode mode)
     return motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::stop(mode));
 }
 
-bool MotorService::stopAll(motion::StopMode mode)
+PairReceipt MotorService::stopAll(motion::StopMode mode)
 {
-    bool ok = true;
-    for (auto &motor : motors_) {
-        if (mode == motion::StopMode::Immediate) {
-            ok = motor.emergencyStop() && ok;
-        } else {
-            ok = motor.post(motion::AxisCommand::stop(mode)) && ok;
-        }
+    PairReceipt receipts{};
+    if (mode == motion::StopMode::Immediate) {
+        receipts.azimuth = motors_[0].emergencyStop();
+        receipts.altitude = motors_[1].emergencyStop();
+        return receipts;
     }
-    return ok;
+    receipts.azimuth = motors_[0].post(motion::AxisCommand::stop(mode));
+    receipts.altitude = motors_[1].post(motion::AxisCommand::stop(mode));
+    return receipts;
 }
 
 bool MotorService::release(motion::AxisId id)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::release());
+    return valid(id) &&
+           motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::release()).accepted;
 }
 
 bool MotorService::energize(motion::AxisId id)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::energize());
+    return valid(id) &&
+           motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::energize()).accepted;
 }
 
 bool MotorService::setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(
-                            motion::AxisCommand::setHoldPolicy(policy));
+    return valid(id) && motors_[static_cast<std::size_t>(id)]
+                            .post(motion::AxisCommand::setHoldPolicy(policy))
+                            .accepted;
 }
 
-bool MotorService::resetFault(motion::AxisId id)
+CommandReceipt MotorService::resetFault(motion::AxisId id)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)].post(
-                            motion::AxisCommand::resetFault());
+    if (!valid(id)) {
+        return CommandReceipt{};
+    }
+    return motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::resetFault());
+}
+
+std::uint32_t MotorService::emergencySlotBusy() const noexcept
+{
+    return motors_[0].emergencySlotBusy() + motors_[1].emergencySlotBusy();
+}
+
+std::uint32_t MotorService::notifyFailures() const noexcept
+{
+    return motors_[0].notifyFailures() + motors_[1].notifyFailures();
 }
 
 motion::AxisStatus MotorService::status(motion::AxisId id) const

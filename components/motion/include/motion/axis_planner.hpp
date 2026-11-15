@@ -38,6 +38,10 @@ struct AxisStatus {
     bool energized = false;      ///< заполняется исполнителем
     bool homed = false;          ///< до верхнего слоя калибровки всегда false
     bool position_trusted = true;
+    /// Заполняются исполнителем, а не планировщиком: подтверждение команд.
+    std::uint64_t last_applied_command_id = 0;
+    std::uint32_t command_epoch = 0;
+    std::uint32_t unmatched_emergency_notifications = 0;
     std::uint64_t late_corrections = 0;
     std::uint64_t late_replans = 0;
     std::uint64_t stale_events = 0;

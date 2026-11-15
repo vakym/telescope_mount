@@ -32,6 +32,10 @@ struct AxisCommand {
     float value = 0.0F;
     std::int64_t steps = 0;
     HoldPolicy hold{};
+    /// Идентификатор команды. Поле-результат: назначается в единственной
+    /// точке отправки (AxisMotor::post) и не читается ею на входе.
+    /// 0 означает «идентификатор ещё не назначен».
+    std::uint64_t id = 0;
 
     static AxisCommand enable() noexcept;
     static AxisCommand disable() noexcept;

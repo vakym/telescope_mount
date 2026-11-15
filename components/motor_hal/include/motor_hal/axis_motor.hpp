@@ -9,6 +9,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -28,6 +29,15 @@
 #include "motor_hal/gptimer_step_clock.hpp"
 
 namespace motor_hal {
+
+/// Результат приёма команды. Для FIFO-команды accepted означает фактическое
+/// присутствие в очереди, для Immediate — публикацию id в emergency-слоте.
+struct CommandReceipt {
+    bool accepted = false;
+    bool notified = false;
+    std::uint64_t command_id = 0;
+    std::uint32_t epoch = 0;
+};
 
 class AxisMotor final : private motion::CommandSource {
 public:
@@ -52,19 +62,31 @@ public:
                     const motion::AxisConfig &config);
     esp_err_t stop();
 
-    /// true = команда поставлена в очередь (не подтверждение приёма).
-    bool post(const motion::AxisCommand &cmd);
+    /// Назначает новый ненулевой id, ставит команду в очередь и уведомляет
+    /// задачу. Входное значение поля id игнорируется.
+    CommandReceipt post(motion::AxisCommand cmd);
 
-    /// Приоритетный запрос без очереди.
-    bool emergencyStop();
+    /// Приоритетный запрос без очереди: id публикуется в слоте.
+    CommandReceipt emergencyStop();
 
     motion::AxisStatus status() const;
+
+    /// Диагностика канала приоритетного останова.
+    std::uint32_t emergencySlotBusy() const noexcept
+    {
+        return emergency_slot_busy_.load(std::memory_order_relaxed);
+    }
+    std::uint32_t notifyFailures() const noexcept
+    {
+        return notify_failures_.load(std::memory_order_relaxed);
+    }
 
     // motion::CommandSource. Вызывается только задачей этой оси:
     // очередь защищена от удаления жизненным циклом (api_mutex_).
     std::size_t take(motion::AxisCommand *out, std::size_t max_count) override;
     bool empty() const override;
     void clear() override;
+    std::uint64_t takeEmergencyId() override;
 
 private:
     /// Явный жизненный цикл: таймаут подтверждения оставляет ось в Stopping.
@@ -78,6 +100,9 @@ private:
 
     /// Освобождает всё, что успел создать start(); идемпотентен.
     void cleanupResources();
+
+    /// Следующий идентификатор команды; 0 — исчерпан, не переиспользуем.
+    std::uint64_t nextId() noexcept;
 
     GptimerStepClock clock_{};
     CoilDriver coil_{};
@@ -93,6 +118,14 @@ private:
     StaticSemaphore_t api_mutex_storage_{};
     SemaphoreHandle_t api_mutex_ = nullptr;
     Lifecycle lifecycle_ = Lifecycle::Stopped;
+
+    /// Назначается в единственной точке отправки и не сбрасывается при
+    /// перезапуске верхнего слоя; эпоха меняется только на start().
+    std::uint64_t next_id_ = 1;
+    std::uint32_t epoch_ = 0;
+    std::atomic<std::uint64_t> pending_emergency_id_{0};
+    std::atomic<std::uint32_t> emergency_slot_busy_{0};
+    std::atomic<std::uint32_t> notify_failures_{0};
 };
 
 }  // namespace motor_hal

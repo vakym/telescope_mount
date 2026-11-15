@@ -1,0 +1,108 @@
+menu "Telescope mount control"
+
+    config CTRL_PERIOD_MS
+        int "Control cycle period (ms)"
+        range 20 500
+        default 50
+        help
+            Период управляющей задачи. Опрос джойстика идёт с периодом
+            JOY_SAMPLE_PERIOD_MS, поэтому более редкий цикл не грубее входной
+            динамики, а более частый разрушает расписание шагов.
+
+    config CTRL_TASK_STACK
+        int "Control task stack size (bytes)"
+        range 2048 8192
+        default 3584
+
+    config CTRL_TASK_PRIORITY
+        int "Control task priority"
+        range 1 15
+        default 6
+        help
+            Выше задачи джойстика (5) и WiFi (4), ниже задач осей (10).
+
+    config CTRL_TASK_CORE
+        int "Control task core"
+        range 0 1
+        default 0
+
+    config CTRL_INPUT_GRACE_US
+        int "Input grace after single ADC error (us)"
+        range 0 1000000
+        default 100000
+        help
+            Удержание последней успешно поставленной уставки при единичной
+            ошибке отсчёта. Срок отсчитывается от ПЕРВОЙ ошибки и не
+            продлевается. 0 выключает удержание.
+
+    config CTRL_AXIS_STALE_US
+        int "Stale age for motor and joystick observations (us)"
+        range 50000 2000000
+        default 500000
+
+    config CTRL_RATE_DEADBAND_HALF_STEPS_S
+        int "Rate deadband (half-steps/s)"
+        range 0 200
+        default 8
+        help
+            Минимальное изменение уставки, которое стоит отправлять.
+            Подавление дублей не теряет нуль, останов и недоставленную команду.
+
+    config CTRL_STOP_CONFIRM_TIMEOUT_US
+        int "Stop confirmation timeout before escalation (us)"
+        range 100000 10000000
+        default 1500000
+        help
+            Торможение с 800 полушагов/с при decel 800 занимает 1 с; таймаут
+            должен быть больше.
+
+    config CTRL_STOP_TIMEOUT_MS
+        int "Control task stop confirmation timeout (ms)"
+        range 500 30000
+        default 5000
+        help
+            Ограничивает ожидание вызывающего в stop(). При таймауте
+            состояние остаётся Stopping, повторный stop() доводит.
+
+    config CTRL_ACK_TIMEOUT_MS
+        int "Recovery request timeout (ms)"
+        range 100 30000
+        default 2000
+        help
+            Ограничивает ожидание acknowledgeFault(). По таймауту защёлка
+            сохраняется, поздний результат её не снимает.
+
+    config CTRL_DELIVERY_FAILURE_LIMIT
+        int "Consecutive delivery failures before stop"
+        range 1 10
+        default 3
+
+    config CTRL_INTENT_LEASE_US
+        int "External intent lease (us)"
+        range 20000 5000000
+        default 200000
+
+    config CTRL_JOY_IDLE_RELEASE_MS
+        int "Joystick releases ownership after neutral (ms)"
+        range 0 60000
+        default 3000
+        help
+            0 — джойстик удерживает владение при нейтрали бессрочно.
+
+    config CTRL_AXIS_MAX_RATE_HALF_STEPS_S
+        int "Maximum axis rate (half-steps/s)"
+        range 100 1600
+        default 800
+        help
+            Должно совпадать с max_rate_steps_s конфигурации оси: иначе
+            планировщик молча ограничит уставку.
+
+    config CTRL_JOY_MIN_RATE_HALF_STEPS_S
+        int "Minimum active rate (half-steps/s)"
+        range 0 400
+        default 40
+        help
+            Пол ненулевой уставки при выходе из мёртвой зоны. Снижает риск
+            голодания шагов на малых скоростях; проверяется моделью.
+
+endmenu

@@ -1,0 +1,31 @@
+/**
+ * @file actuator.hpp
+ * @brief Порт исполнения: единственная точка отправки команд в моторы.
+ *
+ * Реализация для ESP-IDF (control_hal::MotorAxisPort) оборачивает
+ * motor_hal::MotorService. Тестовая реализация — в test/host. Чистая логика
+ * не знает о MotorService и FreeRTOS.
+ */
+
+#pragma once
+
+#include "control/command_ticket.hpp"
+#include "motion/axis_planner.hpp"
+#include "motion/types.hpp"
+
+namespace control {
+
+class AxisActuator {
+public:
+    virtual ~AxisActuator() = default;
+
+    virtual Delivery enable(motion::AxisId id) = 0;
+    virtual Delivery setRate(motion::AxisId id, float half_steps_per_s) = 0;
+    virtual Delivery stopSmooth(motion::AxisId id) = 0;
+    virtual Delivery stopImmediate(motion::AxisId id) = 0;
+    virtual Delivery resetFault(motion::AxisId id) = 0;
+
+    virtual motion::AxisStatus status(motion::AxisId id) const = 0;
+};
+
+}  // namespace control

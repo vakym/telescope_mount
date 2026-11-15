@@ -496,6 +496,8 @@ void emergencyStop()
     const int releases = rig.coil.releases;
 
     rig.source.push(AxisCommand::setTargetRate(500.0F));
+    // Подтверждается конкретный запрос: id публикуется в слоте до уведомления.
+    rig.source.pending_emergency_id = 1;
     rig.executor.onWakeup(motion::EmergencyStop);
 
     CHECK(rig.coil.advances == advances);   // шаг не добавляется

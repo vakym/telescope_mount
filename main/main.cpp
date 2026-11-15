@@ -11,6 +11,8 @@
 #include <cstdint>
 
 #include "board/board.hpp"
+#include "control/joy_mapping.hpp"
+#include "control_hal/control_service.hpp"
 #include "esp_chip_info.h"
 #include "esp_err.h"
 #include "esp_flash.h"
@@ -25,6 +27,8 @@
 #include "motion/axis_config.hpp"
 #include "motor_hal/motor_service.hpp"
 #include "sdkconfig.h"
+#include "state/channels.hpp"
+#include "state_hal/state_hub.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
 namespace {
@@ -179,6 +183,25 @@ motion::AxisConfig makeAxisConfig(motion::AxisId id)
     motion::AxisConfig cfg;
     cfg.id = id;
     cfg.min_phase_interval_us = CONFIG_MOTOR_MIN_STEP_INTERVAL_US;
+    // Скорости осей и mapping берут значения из одних и тех же символов,
+    // чтобы планировщик не ограничивал уставку молча.
+    cfg.start_rate_steps_s = static_cast<float>(CONFIG_APP_AXIS_START_RATE_HALF_STEPS_S);
+    cfg.max_rate_steps_s = static_cast<float>(CONFIG_APP_AXIS_MAX_RATE_HALF_STEPS_S);
+    return cfg;
+}
+
+control::JoyMappingConfig makeJoyMapping()
+{
+    control::JoyMappingConfig cfg;
+    cfg.x_axis = motion::AxisId::Azimuth;
+    cfg.y_axis = motion::AxisId::Altitude;
+    cfg.max_rate[0] = static_cast<float>(CONFIG_APP_AXIS_MAX_RATE_HALF_STEPS_S);
+    cfg.max_rate[1] = static_cast<float>(CONFIG_APP_AXIS_MAX_RATE_HALF_STEPS_S);
+    cfg.min_run_rate[0] = static_cast<float>(CONFIG_CTRL_JOY_MIN_RATE_HALF_STEPS_S);
+    cfg.min_run_rate[1] = static_cast<float>(CONFIG_CTRL_JOY_MIN_RATE_HALF_STEPS_S);
+    // Одна настройка мёртвой зоны на input_hal и control_hal.
+    cfg.dead_zone = static_cast<float>(CONFIG_JOY_DEAD_ZONE_PERMILLE) / 1000.0F;
+    cfg.stale_after_us = CONFIG_CTRL_AXIS_STALE_US;
     return cfg;
 }
 
@@ -258,6 +281,40 @@ void logAxis(motor_hal::MotorService &service, motion::AxisId id)
              static_cast<unsigned long long>(status.late_replans),
              static_cast<unsigned long long>(status.stale_events),
              static_cast<unsigned long long>(status.rejected_commands));
+}
+
+void logControl(control_hal::ControlService &control)
+{
+    const control_hal::ControlStatus status = control.status();
+    ESP_LOGI(kTag,
+             "control: phase=%s latch=%s owner=%s gen=%lu permit=%d recovery=%d "
+             "desired=%.1f/%.1f enqueued=%.1f/%.1f confirmed=%.1f/%.1f "
+             "joy_valid=%d joy_fresh=%d joy_neutral=%d joy_fault=%d "
+             "delivery_fail=%lu/%lu stop_timeouts=%lu escalations=%lu "
+             "ack_mismatch=%lu slot_busy=%lu unmatched_em=%lu notify_fail=%lu "
+             "rejected=%lu cycles=%lu",
+             state::phaseName(status.phase), state::latchName(status.latch),
+             state::sourceName(status.owner),
+             static_cast<unsigned long>(status.owner_generation),
+             status.permit ? 1 : 0, status.recovery_active ? 1 : 0,
+             static_cast<double>(status.desired_rate[0]),
+             static_cast<double>(status.desired_rate[1]),
+             static_cast<double>(status.enqueued_rate[0]),
+             static_cast<double>(status.enqueued_rate[1]),
+             static_cast<double>(status.confirmed_rate[0]),
+             static_cast<double>(status.confirmed_rate[1]),
+             status.joystick_valid ? 1 : 0, status.joystick_fresh ? 1 : 0,
+             status.joystick_neutral ? 1 : 0, status.joystick_fault ? 1 : 0,
+             static_cast<unsigned long>(status.delivery_failures[0]),
+             static_cast<unsigned long>(status.delivery_failures[1]),
+             static_cast<unsigned long>(status.stop_timeouts),
+             static_cast<unsigned long>(status.escalations),
+             static_cast<unsigned long>(status.ack_mismatches),
+             static_cast<unsigned long>(status.emergency_slot_busy),
+             static_cast<unsigned long>(status.unmatched_emergency_notifications),
+             static_cast<unsigned long>(status.notify_failures),
+             static_cast<unsigned long>(status.rejected_intents),
+             static_cast<unsigned long>(status.cycles));
 }
 
 #if CONFIG_APP_MOTOR_SELFTEST
@@ -358,8 +415,9 @@ extern "C" void app_main(void)
 #endif
 
     // Запуск после самотеста: синхронная калибровка до 10 с не задерживает
-    // проверку приводов. Джойстик только публикует состояние, MotorService
-    // здесь не используется.
+    // проверку приводов. Владелец движения передаётся управляющей службе
+    // только здесь, поэтому одновременное управление невозможно.
+    static state_hal::StateHub hub;
     ButtonStatsListener button_listener(access_point);
     input_hal::JoystickService joystick;
     const esp_err_t joystick_err =
@@ -369,11 +427,28 @@ extern "C" void app_main(void)
                  esp_err_to_name(joystick_err));
     }
 
+    control_hal::ControlService control(service, joystick, hub);
+    if (joystick_err == ESP_OK) {
+        const esp_err_t control_err = control.start(makeJoyMapping());
+        if (control_err != ESP_OK) {
+            ESP_LOGE(kTag, "control unavailable: %s",
+                     esp_err_to_name(control_err));
+        } else {
+            const esp_err_t arm_err = control.arm();
+            if (arm_err != ESP_OK) {
+                // Защёлка сохранена: движение запрещено до acknowledgeFault.
+                ESP_LOGW(kTag, "control armed with latch: %s",
+                         esp_err_to_name(arm_err));
+            }
+        }
+    }
+
     while (true) {
         ESP_LOGI(kTag, "heartbeat");
         logAxis(service, motion::AxisId::Azimuth);
         logAxis(service, motion::AxisId::Altitude);
         logJoystick(joystick);
+        logControl(control);
         logButtonStats(button_listener.stats());
         logAccessPoint(access_point.status());
         vTaskDelay(pdMS_TO_TICKS(CONFIG_APP_STATUS_PERIOD_MS));

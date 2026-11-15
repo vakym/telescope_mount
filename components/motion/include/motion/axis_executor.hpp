@@ -32,6 +32,8 @@ public:
     struct Params {
         std::uint32_t watchdog_us = 5000;   ///< запас ожидания события таймера
         std::size_t command_budget = 8;     ///< команд за итерацию
+        /// Эпоха запуска оси: публикуется в AxisStatus и входит в тикет.
+        std::uint32_t command_epoch = 1;
     };
 
     AxisExecutor(AxisPlanner &planner,
@@ -54,7 +56,7 @@ public:
     bool holdsTimer() const noexcept { return hold_timer_active_; }
 
 private:
-    void handleEmergency() noexcept;
+    void handleEmergency(std::uint32_t bits) noexcept;
     void handleCommands() noexcept;
     void handleTimer() noexcept;
     void handleMissed(std::uint64_t now, FaultReason reason) noexcept;
@@ -73,6 +75,8 @@ private:
     CommandSource &source_;
     Params params_;
 
+    std::uint64_t last_applied_id_ = 0;
+    std::uint32_t unmatched_emergency_notifications_ = 0;
     bool last_switch_known_ = false;
     std::uint64_t last_switch_us_ = 0;
     std::uint64_t pending_deadline_us_ = 0;

@@ -81,6 +81,8 @@ public:
 class FakeSource final : public motion::CommandSource {
 public:
     std::deque<motion::AxisCommand> queue;
+    /// Ожидающий идентификатор приоритетного останова; 0 — запроса нет.
+    std::uint64_t pending_emergency_id = 0;
 
     void push(const motion::AxisCommand &cmd) { queue.push_back(cmd); }
 
@@ -97,6 +99,13 @@ public:
     bool empty() const override { return queue.empty(); }
 
     void clear() override { queue.clear(); }
+
+    std::uint64_t takeEmergencyId() override
+    {
+        const std::uint64_t taken = pending_emergency_id;
+        pending_emergency_id = 0;
+        return taken;
+    }
 };
 
 }  // namespace fakes

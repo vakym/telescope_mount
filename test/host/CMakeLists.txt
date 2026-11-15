@@ -20,6 +20,8 @@ get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 set(MOTION_DIR "${REPO_ROOT}/components/motion")
 set(INPUT_DIR "${REPO_ROOT}/components/input")
 set(WIFI_DIR "${REPO_ROOT}/components/wifi")
+set(STATE_DIR "${REPO_ROOT}/components/state")
+set(CONTROL_DIR "${REPO_ROOT}/components/control")
 
 add_library(motion_host STATIC
     "${MOTION_DIR}/src/axis_config.cpp"
@@ -47,6 +49,29 @@ add_library(wifi_host STATIC
 )
 target_include_directories(wifi_host PUBLIC "${WIFI_DIR}/include")
 target_compile_options(wifi_host PRIVATE -Wall -Wextra -Werror)
+
+add_library(state_host STATIC
+    "${STATE_DIR}/src/health.cpp"
+    "${STATE_DIR}/src/channels.cpp"
+)
+target_include_directories(state_host PUBLIC "${STATE_DIR}/include")
+target_link_libraries(state_host PUBLIC motion_host input_host)
+target_compile_options(state_host PRIVATE -Wall -Wextra -Werror)
+
+# control зависит от state и типов motion/input; id назначает нижний слой,
+# поэтому control_host тестируется с fake-портом исполнения.
+add_library(control_host STATIC
+    "${CONTROL_DIR}/src/joy_mapping.cpp"
+    "${CONTROL_DIR}/src/input_grace.cpp"
+    "${CONTROL_DIR}/src/rate_gate.cpp"
+    "${CONTROL_DIR}/src/stop_protocol.cpp"
+    "${CONTROL_DIR}/src/arming.cpp"
+    "${CONTROL_DIR}/src/intent_inbox.cpp"
+    "${CONTROL_DIR}/src/arbiter.cpp"
+)
+target_include_directories(control_host PUBLIC "${CONTROL_DIR}/include")
+target_link_libraries(control_host PUBLIC state_host motion_host input_host)
+target_compile_options(control_host PRIVATE -Wall -Wextra -Werror)
 
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -83,6 +108,22 @@ foreach(test_name
         test_ap_lifecycle)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE wifi_host)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+foreach(test_name
+        test_state_health
+        test_joy_mapping
+        test_arbiter
+        test_intent_inbox
+        test_arming
+        test_stop_protocol
+        test_rate_gate
+        test_input_grace
+        test_axis_command_ack)
+    add_executable(${test_name} "${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE control_host)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()

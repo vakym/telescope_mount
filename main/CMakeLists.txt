@@ -7,5 +7,5 @@
 idf_component_register(
     SRCS "main.cpp"
     INCLUDE_DIRS "."
-    REQUIRES board motion motor_hal input input_hal wifi_hal
+    REQUIRES board motion motor_hal input input_hal wifi_hal state state_hal control control_hal
 )

@@ -11,6 +11,21 @@ menu "Application"
             По умолчанию выключен: самотест двигает обе оси, поэтому его
             следует включать только на стенде.
 
+    config APP_AXIS_START_RATE_HALF_STEPS_S
+        int "Axis start rate (half-steps/s)"
+        range 20 800
+        default 100
+        help
+            Скорость первого шага. Не является нижним пределом уставки.
+
+    config APP_AXIS_MAX_RATE_HALF_STEPS_S
+        int "Axis maximum rate (half-steps/s)"
+        range 100 1600
+        default 800
+        help
+            Должно совпадать с CTRL_AXIS_MAX_RATE_HALF_STEPS_S: иначе
+            планировщик молча ограничит уставку джойстика.
+
     config APP_STATUS_PERIOD_MS
         int "Axis status log period (ms)"
         default 5000
