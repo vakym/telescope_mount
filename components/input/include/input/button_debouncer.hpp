@@ -45,8 +45,8 @@ public:
     /// true, если debounce_ms > 0 и long_press_ms > 0.
     bool isValid(const ButtonConfig &config) noexcept;
 
-    /// Невалидная конфигурация заменяется значениями по умолчанию.
-    void configure(const ButtonConfig &config) noexcept;
+    /// false = конфигурация отвергнута; значения по умолчанию не подставляются.
+    bool configure(const ButtonConfig &config) noexcept;
 
     /// Фиксирует исходное состояние без генерации события.
     void reset(bool raw_pressed, std::uint32_t now_ms) noexcept;

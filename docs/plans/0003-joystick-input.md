@@ -428,7 +428,7 @@ struct SampleGateConfig {
 class SampleGate {
 public:
     bool isValid(const SampleGateConfig &config) noexcept;
-    void configure(const SampleGateConfig &config) noexcept;
+    bool configure(const SampleGateConfig &config) noexcept;
     void reset() noexcept;  // счётчики 0, fault false, output false
     SampleGateAction update(bool sample_valid) noexcept;
     bool outputValid() const noexcept;
@@ -449,7 +449,10 @@ public:
 | успех во время fault на пороге | `RecoverAndProcess` | `faulted = false`, `output_valid = true` |
 
 - Валидны только `error_threshold >= 1` и `recovery_threshold >= 1`.
-  Нулевой порог отвергается, а не получает неявный смысл.
+  Нулевой порог отвергается: `configure()` возвращает `false` и не
+  подставляет значения по умолчанию.
+- Обычный успех без fault тоже увеличивает насыщающийся счётчик
+  последовательных успехов; ошибка обнуляет его.
 - Счётчики последовательных ошибок и успехов насыщаются на своих порогах:
   после достижения значения больше не растут.
 - `reset()` обнуляет счётчики, снимает fault и `output_valid`.
@@ -486,7 +489,7 @@ public:
 class ButtonDebouncer {
 public:
     bool isValid(const ButtonConfig &config) noexcept;
-    void configure(const ButtonConfig &config) noexcept;
+    bool configure(const ButtonConfig &config) noexcept;
     /// Фиксирует исходное состояние без генерации события.
     void reset(bool raw_pressed, std::uint32_t now_ms) noexcept;
     ButtonEvents update(bool raw_pressed, std::uint32_t now_ms) noexcept;
@@ -497,7 +500,8 @@ public:
 Правила и порядок событий:
 
 - Валидны только `debounce_ms > 0` и `long_press_ms > 0`; нулевые интервалы
-  на этом этапе отвергаются.
+  отвергаются, `configure()` возвращает `false` без скрытой подстановки
+  значений по умолчанию.
 
 | Ситуация | `ButtonEvents` |
 |---|---|
@@ -610,7 +614,8 @@ public:
 
 ```text
 1. configure input::JoystickConfig из Kconfig
-2. validate config; ошибка -> ESP_ERR_INVALID_ARG, ресурсы не создаются
+2. validate JoystickConfig, SampleGateConfig и ButtonConfig; ошибка ->
+   ESP_ERR_INVALID_ARG, ресурсы не создаются
 3. AdcJoystick::init(), ButtonInput::init()
    ошибка на любом шаге -> полный откат уже созданных ресурсов
 4. калибровка центра:
@@ -869,7 +874,10 @@ heartbeat
     не зависит от состояния до сбоя.
 17. Смещённый центр (например, 1900) корректно нормирует обе стороны
     асимметрично.
-18. Невалидная конфигурация калибратора отвергается: `samples == 0`,
+18. Численный переход EMA при `alpha = 0.25`: центр 2048 и отсчёт 3048
+    дают `filtered` 2298, затем 2485.5; невалидный отсчёт не меняет
+    `filtered`.
+19. Невалидная конфигурация калибратора отвергается: `samples == 0`,
     `NaN` или отрицательный `noise_limit`, неконечные или обратные границы
     центра.
 
@@ -887,7 +895,8 @@ heartbeat
 8. Повторные одинаковые состояния не дублируют события.
 9. Переполнение `uint32_t` времени не ломает длительность нажатия.
 10. За один вызов никогда не возвращается больше двух событий.
-11. `isValid()` отвергает `debounce_ms == 0` и `long_press_ms == 0`.
+11. `isValid()` и `configure()` отвергают `debounce_ms == 0` и
+    `long_press_ms == 0`; defaults не подставляются.
 
 `test_sample_gate.cpp`:
 
@@ -903,8 +912,12 @@ heartbeat
    `ButtonDebouncer` формирует все ожидаемые события независимо от
    `SampleGate`.
 7. `reset()` обнуляет счётчики, fault и `output_valid`.
-8. `isValid()` отвергает `error_threshold == 0` и
-   `recovery_threshold == 0`.
+8. `isValid()` и `configure()` отвергают `error_threshold == 0` и
+   `recovery_threshold == 0`; defaults не подставляются.
+9. Полный цикл с порогами 2/3: две ошибки дают fault, три успеха —
+   восстановление.
+10. Успешные чтения без fault увеличивают счётчик успехов до порога,
+    ошибка обнуляет его.
 
 ## 10. Стендовый протокол проверки
 
@@ -1032,6 +1045,16 @@ heartbeat
   порядок событий на границе длинного нажатия: `[LongPress, Released]`.
 - 2026-11-15 — `main` запускает `JoystickService` после самотеста и только
   логирует состояние; вызовы `MotorService` из джойстика отсутствуют.
+- 2026-11-15 — по итогам ревью: Kconfig-инверсии читаются через `#ifdef`
+  (выключенный bool не определён в `sdkconfig.h`); повторный `stop()` больше
+  не уведомляет возможно удалённую задачу и только ждёт подтверждения;
+  `SampleGate::configure` и `ButtonDebouncer::configure` возвращают `false`
+  без подстановки defaults; счётчик успехов `SampleGate` увеличивается на
+  любом успешном чтении и сбрасывается ошибкой.
+- 2026-11-15 — добавлены численный тест EMA при `alpha = 0.25`, полный цикл
+  fault/recovery с порогами 2/3 и проверка счётчика успехов. Host-тесты —
+  7 из 7. Синтаксис `input_hal` проверен со stub-заголовками в двух
+  конфигурациях: обе инверсии выключены и обе включены.
 - 2026-11-15 — сборка `idf.py build` не выполнена: `idf.py` и `IDF_PATH` в
   текущем окружении отсутствуют, хотя `sdkconfig` сгенерирован ESP-IDF 6.1.0.
   API `adc_oneshot` реализован по 6.1.0 и требует подтверждения при сборке.

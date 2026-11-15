@@ -33,9 +33,12 @@ bool ButtonDebouncer::isValid(const ButtonConfig &config) noexcept
     return config.debounce_ms > 0 && config.long_press_ms > 0;
 }
 
-void ButtonDebouncer::configure(const ButtonConfig &config) noexcept
+bool ButtonDebouncer::configure(const ButtonConfig &config) noexcept
 {
-    config_ = isValid(config) ? config : ButtonConfig{};
+    if (!isValid(config)) {
+        return false;
+    }
+    config_ = config;
     initialized_ = false;
     stable_pressed_ = false;
     raw_pressed_ = false;
@@ -43,6 +46,7 @@ void ButtonDebouncer::configure(const ButtonConfig &config) noexcept
     long_sent_ = false;
     raw_since_ms_ = 0;
     press_started_ms_ = 0;
+    return true;
 }
 
 void ButtonDebouncer::reset(bool raw_pressed, std::uint32_t now_ms) noexcept

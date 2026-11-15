@@ -85,6 +85,40 @@ void countersSaturate()
     CHECK(gate.consecutiveSuccesses() == 5);
 }
 
+void successCounter()
+{
+    input::SampleGate gate;
+    CHECK(gate.configure({5, 3}));
+
+    CHECK(gate.update(true) == SampleGateAction::Process);
+    CHECK(gate.consecutiveSuccesses() == 1);
+    CHECK(gate.update(true) == SampleGateAction::Process);
+    CHECK(gate.update(true) == SampleGateAction::Process);
+    CHECK(gate.consecutiveSuccesses() == 3);
+
+    // Ошибка обнуляет серию успехов даже без fault.
+    CHECK(gate.update(false) == SampleGateAction::Ignore);
+    CHECK(gate.consecutiveSuccesses() == 0);
+}
+
+void customThresholds()
+{
+    input::SampleGate gate;
+    CHECK(gate.configure({2, 3}));
+
+    CHECK(gate.update(false) == SampleGateAction::Ignore);
+    CHECK(gate.update(false) == SampleGateAction::Ignore);
+    CHECK(gate.faulted());
+
+    CHECK(gate.update(true) == SampleGateAction::Ignore);
+    CHECK(gate.update(true) == SampleGateAction::Ignore);
+    CHECK(gate.faulted());
+
+    CHECK(gate.update(true) == SampleGateAction::RecoverAndProcess);
+    CHECK(!gate.faulted());
+    CHECK(gate.outputValid());
+}
+
 void resetClears()
 {
     input::SampleGate gate;
@@ -107,11 +141,14 @@ void invalidConfig()
     CHECK(!gate.isValid({5, 0}));
     CHECK(gate.isValid({1, 1}));
 
-    // Невалидная конфигурация заменяется безопасными значениями 5/5.
-    gate.configure({0, 0});
-    for (int i = 0; i < 5; ++i) {
-        (void)gate.update(false);
-    }
+    // Невалидная конфигурация отвергается, значения по умолчанию не
+    // подставляются молча.
+    CHECK(!gate.configure({0, 0}));
+    CHECK(!gate.configure({0, 5}));
+    CHECK(!gate.configure({5, 0}));
+
+    CHECK(gate.configure({1, 1}));
+    CHECK(gate.update(false) == SampleGateAction::Ignore);
     CHECK(gate.faulted());
 }
 
@@ -151,6 +188,8 @@ int main()
     errorsThenSuccess();
     faultAndInterruptedRecovery();
     countersSaturate();
+    successCounter();
+    customThresholds();
     resetClears();
     invalidConfig();
     buttonIndependentFromAdc();

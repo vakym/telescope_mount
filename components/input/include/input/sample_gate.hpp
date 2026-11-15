@@ -28,8 +28,8 @@ public:
     /// true, если оба порога не меньше 1.
     bool isValid(const SampleGateConfig &config) noexcept;
 
-    /// Невалидная конфигурация заменяется значениями по умолчанию.
-    void configure(const SampleGateConfig &config) noexcept;
+    /// false = конфигурация отвергнута; значения по умолчанию не подставляются.
+    bool configure(const SampleGateConfig &config) noexcept;
 
     void reset() noexcept;
 

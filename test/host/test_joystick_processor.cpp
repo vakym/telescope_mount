@@ -264,6 +264,26 @@ void invalidConfig()
     CHECK(!input::isValid(config));
 }
 
+void emaTransition()
+{
+    input::JoystickProcessor processor;
+    auto config = baseConfig();
+    config.filter_alpha = 0.25F;
+    CHECK(processor.configure(config));
+
+    // filtered1 = 0.25 * 3048 + 0.75 * 2048 = 2298
+    auto state = processor.update(sample(3048, 2048));
+    CHECK_NEAR(state.filtered[0], 2298.0, 0.5);
+
+    // filtered2 = 0.25 * 3048 + 0.75 * 2298 = 2485.5
+    state = processor.update(sample(3048, 2048));
+    CHECK_NEAR(state.filtered[0], 2485.5, 0.5);
+
+    const float before = state.filtered[0];
+    state = processor.update(invalidSample(0, 4095));
+    CHECK_NEAR(state.filtered[0], before, 0.001);
+}
+
 void resetBehaviour()
 {
     input::JoystickProcessor processor;
@@ -320,6 +340,7 @@ int main()
     diagonalMagnitude();
     clampsBeyondEdges();
     invalidConfig();
+    emaTransition();
     resetBehaviour();
     asymmetricCenter();
     return TEST_RESULT();

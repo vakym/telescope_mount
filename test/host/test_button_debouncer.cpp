@@ -136,11 +136,15 @@ void invalidConfig()
     CHECK(!button.isValid({40, 0}));
     CHECK(button.isValid({1, 1}));
 
-    // Невалидные значения заменяются безопасными по умолчанию.
-    button.configure({0, 0});
+    // Невалидные значения отвергаются, defaults молча не подставляются.
+    CHECK(!button.configure({0, 0}));
+    CHECK(!button.configure({0, 1000}));
+    CHECK(!button.configure({40, 0}));
+
+    CHECK(button.configure({40, 1000}));
     button.reset(false, 0);
     (void)button.update(true, 10);
-    const auto press = button.update(true, 50);  // 40 мс по умолчанию
+    const auto press = button.update(true, 50);
     CHECK(press.count == 1);
     CHECK(press.values[0] == ButtonEvent::Pressed);
 }

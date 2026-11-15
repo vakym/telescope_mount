@@ -12,10 +12,15 @@ bool SampleGate::isValid(const SampleGateConfig &config) noexcept
     return config.error_threshold >= 1 && config.recovery_threshold >= 1;
 }
 
-void SampleGate::configure(const SampleGateConfig &config) noexcept
+bool SampleGate::configure(const SampleGateConfig &config) noexcept
 {
-    config_ = isValid(config) ? config : SampleGateConfig{};
+    if (!isValid(config)) {
+        reset();
+        return false;
+    }
+    config_ = config;
     reset();
+    return true;
 }
 
 void SampleGate::reset() noexcept
@@ -41,14 +46,14 @@ SampleGateAction SampleGate::update(bool sample_valid) noexcept
     }
 
     errors_ = 0;
+    if (successes_ < config_.recovery_threshold) {
+        ++successes_;
+    }
     if (!faulted_) {
         output_valid_ = true;
         return SampleGateAction::Process;
     }
 
-    if (successes_ < config_.recovery_threshold) {
-        ++successes_;
-    }
     if (successes_ >= config_.recovery_threshold) {
         faulted_ = false;
         output_valid_ = true;

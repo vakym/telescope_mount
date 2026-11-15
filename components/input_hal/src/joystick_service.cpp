@@ -36,8 +36,12 @@ input::JoystickConfig makeConfig() noexcept
         config.axis[i].min = 0.0F;
         config.axis[i].max = 4095.0F;
     }
-    config.axis[0].invert = CONFIG_JOY_INVERT_X;
-    config.axis[1].invert = CONFIG_JOY_INVERT_Y;
+#ifdef CONFIG_JOY_INVERT_X
+    config.axis[0].invert = true;
+#endif
+#ifdef CONFIG_JOY_INVERT_Y
+    config.axis[1].invert = true;
+#endif
     config.dead_zone =
         static_cast<float>(CONFIG_JOY_DEAD_ZONE_PERMILLE) / 1000.0F;
     config.dead_zone_exit =
@@ -93,7 +97,10 @@ esp_err_t JoystickService::start(const board::JoystickPins &pins,
     }
 
     input::JoystickConfig config = makeConfig();
-    if (!input::isValid(config)) {
+    const input::SampleGateConfig gate_config = makeGateConfig();
+    const input::ButtonConfig button_config = makeButtonConfig();
+    if (!input::isValid(config) || !gate_.isValid(gate_config) ||
+        !debouncer_.isValid(button_config)) {
         unlockApi();
         return ESP_ERR_INVALID_ARG;
     }
@@ -125,8 +132,11 @@ esp_err_t JoystickService::start(const board::JoystickPins &pins,
         unlockApi();
         return result;
     }
-    gate_.configure(makeGateConfig());
-    debouncer_.configure(makeButtonConfig());
+    if (!gate_.configure(gate_config) || !debouncer_.configure(button_config)) {
+        const esp_err_t result = startFailure(ESP_ERR_INVALID_ARG);
+        unlockApi();
+        return result;
+    }
 
     const std::int64_t now_us = esp_timer_get_time();
     const auto now_ms = static_cast<std::uint32_t>(now_us / 1000);
@@ -170,9 +180,14 @@ esp_err_t JoystickService::stop()
         return ESP_OK;
     }
 
-    lifecycle_ = Lifecycle::Stopping;
-    if (task_ != nullptr) {
-        (void)xTaskNotifyGive(task_);
+    // Уведомление отправляется только при переходе Running -> Stopping.
+    // Повторный stop() после таймаута только ждёт подтверждения: task_
+    // может содержать устаревший handle уже завершившейся задачи.
+    if (lifecycle_ == Lifecycle::Running) {
+        lifecycle_ = Lifecycle::Stopping;
+        if (task_ != nullptr) {
+            (void)xTaskNotifyGive(task_);
+        }
     }
 
     const TickType_t timeout = timeoutTicks(CONFIG_JOY_STOP_TIMEOUT_MS);
