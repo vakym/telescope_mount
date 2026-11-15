@@ -26,23 +26,19 @@ constexpr const char *kKeyMaxStations = "maxsta";
 constexpr const char *kKeyHidden = "hidden";
 constexpr const char *kKeyStartOnBoot = "onboot";
 
-void copyBounded(char *destination, std::size_t capacity,
-                 const char *source) noexcept
-{
-    std::size_t i = 0;
-    while (i + 1 < capacity && source[i] != '\0') {
-        destination[i] = source[i];
-        ++i;
-    }
-    destination[i] = '\0';
-}
-
-wifi::AccessPointSettings makeDefaults() noexcept
+/// Значения Kconfig не обрезаются. Строка, которая не помещается в буфер
+/// или содержит непечатаемый символ, помечается невалидной и может быть
+/// заменена только валидным переопределением из NVS.
+wifi::AccessPointSettings makeDefaults(FieldStatus &ssid_status,
+                                       FieldStatus &password_status) noexcept
 {
     wifi::AccessPointSettings settings;
-    copyBounded(settings.ap.ssid, wifi::kSsidCapacity, CONFIG_WIFI_AP_SSID);
-    copyBounded(settings.ap.password, wifi::kPasswordCapacity,
-                CONFIG_WIFI_AP_PASSWORD);
+    if (!wifi::setSsid(settings.ap, CONFIG_WIFI_AP_SSID)) {
+        ssid_status.issue = SettingIssue::KconfigInvalid;
+    }
+    if (!wifi::setPassword(settings.ap, CONFIG_WIFI_AP_PASSWORD)) {
+        password_status.issue = SettingIssue::KconfigInvalid;
+    }
     settings.ap.channel = static_cast<std::uint8_t>(CONFIG_WIFI_AP_CHANNEL);
     settings.ap.max_stations =
         static_cast<std::uint8_t>(CONFIG_WIFI_AP_MAX_STATIONS);
@@ -106,6 +102,14 @@ void markReadError(FieldStatus &status, LoadResult &result,
     }
 }
 
+/// Неверный тип и неверная длина — это испорченное сохранённое значение,
+/// а не ошибка чтения: поле замещается значением Kconfig.
+bool isInvalidValueError(esp_err_t error) noexcept
+{
+    return error == ESP_ERR_NVS_TYPE_MISMATCH ||
+           error == ESP_ERR_NVS_INVALID_LENGTH;
+}
+
 void markAllReadError(LoadResult &result, esp_err_t error) noexcept
 {
     FieldStatus *fields[] = {&result.ssid,       &result.password,
@@ -124,6 +128,11 @@ bool readSsid(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return false;
     }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type", kKeySsid);
+        markInvalid(status, result);
+        return false;
+    }
     if (err != ESP_OK) {
         markReadError(status, result, err);
         return false;
@@ -135,6 +144,11 @@ bool readSsid(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     char buffer[wifi::kSsidCapacity]{};
     err = nvs_get_str(handle, kKeySsid, buffer, &required);
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored value", kKeySsid);
+        markInvalid(status, result);
+        return false;
+    }
     if (err != ESP_OK) {
         markReadError(status, result, err);
         return false;
@@ -146,6 +160,7 @@ bool readSsid(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     (void)wifi::setSsid(settings.ap, buffer);
     status.source = SettingSource::Nvs;
+    status.issue = SettingIssue::None;
     return true;
 }
 
@@ -155,6 +170,12 @@ bool readPassword(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     std::size_t required = 0;
     esp_err_t err = nvs_get_str(handle, kKeyPassword, nullptr, &required);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return false;
+    }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type",
+                 kKeyPassword);
+        markInvalid(status, result);
         return false;
     }
     if (err != ESP_OK) {
@@ -169,6 +190,13 @@ bool readPassword(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     char buffer[wifi::kPasswordCapacity]{};
     err = nvs_get_str(handle, kKeyPassword, buffer, &required);
+    if (isInvalidValueError(err)) {
+        // Значение не логируется: это пароль.
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored value",
+                 kKeyPassword);
+        markInvalid(status, result);
+        return false;
+    }
     if (err != ESP_OK) {
         markReadError(status, result, err);
         return false;
@@ -180,6 +208,7 @@ bool readPassword(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     }
     (void)wifi::setPassword(settings.ap, buffer);
     status.source = SettingSource::Nvs;
+    status.issue = SettingIssue::None;
     return true;
 }
 
@@ -189,6 +218,11 @@ bool readChannel(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     std::uint8_t value = 0;
     const esp_err_t err = nvs_get_u8(handle, kKeyChannel, &value);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return false;
+    }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type", kKeyChannel);
+        markInvalid(status, result);
         return false;
     }
     if (err != ESP_OK) {
@@ -214,6 +248,12 @@ bool readMaxStations(nvs_handle_t handle, wifi::AccessPointSettings &settings,
     if (err == ESP_ERR_NVS_NOT_FOUND) {
         return false;
     }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type",
+                 kKeyMaxStations);
+        markInvalid(status, result);
+        return false;
+    }
     if (err != ESP_OK) {
         markReadError(status, result, err);
         return false;
@@ -235,6 +275,11 @@ bool readFlag(nvs_handle_t handle, const char *key, bool &destination,
     std::uint8_t value = 0;
     const esp_err_t err = nvs_get_u8(handle, key, &value);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return false;
+    }
+    if (isInvalidValueError(err)) {
+        ESP_LOGW(kTag, "nvs key %s ignored: invalid stored type", key);
+        markInvalid(status, result);
         return false;
     }
     if (err != ESP_OK) {
@@ -298,7 +343,7 @@ esp_err_t SettingsStore::initNvs()
 LoadResult SettingsStore::load() const
 {
     LoadResult result;
-    result.settings = makeDefaults();
+    result.settings = makeDefaults(result.ssid, result.password);
 
 #ifdef CONFIG_WIFI_SETTINGS_FROM_NVS
     nvs_handle_t handle = 0;

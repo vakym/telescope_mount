@@ -37,6 +37,10 @@ constexpr TickType_t kSupervisionSliceMs = 100;
 
 void logField(const char *name, const FieldStatus &status)
 {
+    if (status.issue == SettingIssue::KconfigInvalid) {
+        ESP_LOGE(kTag, "settings %s: kconfig value is not usable", name);
+        return;
+    }
     if (status.issue == SettingIssue::InvalidValue) {
         ESP_LOGW(kTag, "settings %s: nvs value ignored", name);
         return;
@@ -146,8 +150,12 @@ esp_err_t WifiApService::start()
     // подтверждение уже потреблено: очистка семафора — защитная мера.
     shutdown_requested_.store(false, std::memory_order_release);
     resync_requested_.store(false, std::memory_order_release);
-    teardown_result_ = ESP_OK;
+    teardown_result_.store(ESP_OK, std::memory_order_release);
     task_exited_.store(false, std::memory_order_release);
+    {
+        StateLock lock(state_mutex_);
+        last_error_ = ESP_OK;
+    }
     while (xSemaphoreTake(exit_sem_, 0) == pdTRUE) {
     }
     (void)admission_.dropPending(wifi::ToggleAdmission::DropReason::Shutdown);
@@ -165,6 +173,16 @@ esp_err_t WifiApService::start()
     logLoadResult(load);
     if (load.status != ESP_OK) {
         return failStart(load.status);
+    }
+
+    // Значения Kconfig не обрезаются: не поместившееся значение — явная
+    // ошибка, если его не заменило валидное переопределение из NVS.
+    if (load.ssid.issue == SettingIssue::KconfigInvalid ||
+        load.password.issue == SettingIssue::KconfigInvalid) {
+        ESP_LOGE(kTag,
+                 "invalid Kconfig value for ssid/password: value does not fit "
+                 "or is not printable; fix menuconfig or override in NVS");
+        return failStart(ESP_ERR_INVALID_ARG);
     }
 
     const wifi::ConfigError config_error = wifi::validate(load.settings);
@@ -212,7 +230,7 @@ esp_err_t WifiApService::stop()
     }
     if (lifecycle_ == wifi::Lifecycle::Stopping && task_ == nullptr) {
         // Финализация уже выполнена: код сохранён, ожидания нет.
-        return teardown_result_;
+        return teardown_result_.load(std::memory_order_acquire);
     }
 
     if (lifecycle_ != wifi::Lifecycle::Stopping) {
@@ -320,7 +338,7 @@ AccessPointStatus WifiApService::status() const
     snapshot.rejected_api_busy = rejected_api_busy_.load();
     snapshot.rejected_state_busy = rejected_state_busy_.load();
     snapshot.internal_errors = internal_errors_.load();
-    snapshot.teardown_result = teardown_result_;
+    snapshot.teardown_result = teardown_result_.load(std::memory_order_acquire);
     return snapshot;
 }
 
@@ -355,7 +373,7 @@ void WifiApService::run()
         (void)admission_.dropPending(
             wifi::ToggleAdmission::DropReason::Shutdown);
         const esp_err_t result = teardown();
-        teardown_result_ = result;
+        teardown_result_.store(result, std::memory_order_release);
         {
             StateLock lock(state_mutex_);
             if (result == ESP_OK) {
@@ -570,6 +588,19 @@ esp_err_t WifiApService::initialStart(bool start_on_boot)
         return ESP_OK;
     }
 
+    // Операция первоначального запуска взводится до вызова драйвера:
+    // иначе supervise() увидит operation == None при radio == Unknown и
+    // примет ещё не пришедший AP_START за несовпадение.
+    {
+        StateLock lock(state_mutex_);
+        if (coordinator_.beginInitialStart() != wifi::Action::StartRadio) {
+            internal_errors_.fetch_add(1, std::memory_order_relaxed);
+            last_error_ = ESP_ERR_INVALID_STATE;
+            ESP_LOGE(kTag, "initial start operation was not armed");
+            return ESP_ERR_INVALID_STATE;
+        }
+    }
+
     const esp_err_t err = esp_wifi_start();
     if (err != ESP_OK) {
         {
@@ -606,6 +637,21 @@ esp_err_t WifiApService::initialStart(bool start_on_boot)
 esp_err_t WifiApService::failStart(esp_err_t cause)
 {
     const esp_err_t teardown_error = teardown();
+    // Синхронный rollback выполнен без задачи: сохраняем его результат,
+    // иначе последующий stop() вернул бы ложный успех.
+    teardown_result_.store(teardown_error, std::memory_order_release);
+
+    {
+        StateLock lock(state_mutex_);
+        last_error_ = cause;
+        if (teardown_error == ESP_OK) {
+            coordinator_.startupFailed();
+        } else {
+            // Терминальная остановка: ресурсы удерживаются.
+            (void)coordinator_.beginShutdown();
+        }
+    }
+
     if (teardown_error != ESP_OK) {
         lifecycle_ = wifi::Lifecycle::Stopping;
         published_lifecycle_.store(wifi::Lifecycle::Stopping);
@@ -665,7 +711,7 @@ esp_err_t WifiApService::teardown()
 esp_err_t WifiApService::finalizeStopLocked()
 {
     // Вызывается только под api_mutex_ и никогда его не освобождает.
-    const esp_err_t result = teardown_result_;
+    const esp_err_t result = teardown_result_.load(std::memory_order_acquire);
     task_ = nullptr;
     if (result == ESP_OK) {
         lifecycle_ = wifi::Lifecycle::Stopped;
@@ -699,7 +745,15 @@ WifiApService::Supervision WifiApService::supervise(wifi::RadioState expected)
 
         const TickType_t now = xTaskGetTickCount();
         if (static_cast<std::int32_t>(now - deadline) >= 0) {
+            // Решение принимается под state_mutex_ после повторной проверки:
+            // обработчик мог подтвердить операцию между двумя блокировками.
             StateLock lock(state_mutex_);
+            const wifi::Operation current = coordinator_.operation();
+            if (current == wifi::Operation::None) {
+                return coordinator_.radioState() == expected
+                           ? Supervision::Confirmed
+                           : Supervision::Mismatch;
+            }
             coordinator_.onOperationTimeout();
             last_error_ = ESP_ERR_TIMEOUT;
             return Supervision::TimedOut;

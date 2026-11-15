@@ -30,6 +30,10 @@ public:
     void startupSucceeded(bool ap_confirmed_running) noexcept;
     void startupFailed() noexcept;
 
+    /// Операция первоначального запуска AP. Взводит `Starting`, чтобы
+    /// служба ждала AP_START, а не считала состояние несовпавшим.
+    Action beginInitialStart() noexcept;
+
     /// Действие для уже извлечённой заявки. None — состояние не позволяет
     /// начать операцию; служба считает это внутренней ошибкой.
     Action beginToggleOperation() noexcept;

@@ -426,6 +426,10 @@ public:
     void startupSucceeded(bool ap_confirmed_running) noexcept;
     void startupFailed() noexcept;
 
+    /// Операция первоначального запуска: взводит `Starting`, чтобы служба
+    /// ждала `AP_START`, а не считала `Unknown` несовпадением.
+    Action beginInitialStart() noexcept;
+
     /// Действие для уже извлечённой заявки; None — состояние не позволяет
     /// начать операцию (служба считает это внутренней ошибкой).
     Action beginToggleOperation() noexcept;
@@ -462,6 +466,8 @@ public:
 | Ситуация | Наблюдаемое радио | Операция |
 |---|---|---|
 | `beginStartup()` из `Stopped` | `Unknown` | `None` |
+| `beginInitialStart()` при `Starting` и радио `Unknown` | без изменений | `Starting`, `StartRadio` |
+| `beginInitialStart()` иначе | без изменений | без изменений, `None` |
 | `startupSucceeded(true)` | `Running` | `None` |
 | `startupSucceeded(false)` | `Stopped` | `None` |
 | `startupFailed()` | `Unknown` | `None` |
@@ -591,9 +597,15 @@ public:
 - ошибка `initNvs()` возвращается вызывающему; AP не запускается, NVS не
   стирается повторно во время работы;
 - `ESP_ERR_NVS_NOT_FOUND` — «ключ отсутствует», не ошибка;
-- `TYPE_MISMATCH` и `INVALID_LENGTH` — `InvalidValue` с предупреждением без
-  содержимого;
+- `TYPE_MISMATCH` и `INVALID_LENGTH` (на обоих этапах чтения строк) —
+  `InvalidValue` с предупреждением без содержимого значения, поле
+  замещается значением Kconfig;
 - прочие ошибки чтения — `ReadError`, `any_read_error`, ненулевой `status`;
+- строки Kconfig не обрезаются: если `CONFIG_WIFI_AP_SSID` или
+  `CONFIG_WIFI_AP_PASSWORD` не помещаются в буфер или непечатаемы, поле
+  помечается `KconfigInvalid`. Запуск тогда возможен только при валидном
+  переопределении этого поля из NVS; иначе `start()` возвращает явную
+  ошибку без молчаливой подмены значения;
 - итоговые настройки проверяются `wifi::validate()`, источник каждой
   настройки попадает в лог;
 - `save()` пишет ключи и вызывает `nvs_commit()`; атомарность набора
@@ -695,7 +707,11 @@ private:
 5. Регистрация экземпляра обработчика событий.
 6. Начальный запуск:
    - `start_on_boot = false` → `startupSucceeded(false)`;
-   - иначе `esp_wifi_start()`:
+   - иначе операция первоначального запуска взводится до вызова драйвера
+     (`beginInitialStart()`), иначе первая же проверка ожидания увидит
+     `operation == None` и `radio == Unknown` и примет ещё не пришедший
+     `AP_START` за несовпадение;
+   - `esp_wifi_start()`:
      - `ESP_OK` и `AP_START` подтверждён → `startupSucceeded(true)`;
      - таймаут → одна попытка `doResyncOnce()`; она может подтвердить
        только `Stopped` (`AP_STOP` или `ESP_ERR_WIFI_NOT_STARTED`) либо
@@ -738,7 +754,7 @@ admission_.dropPending(wifi::ToggleAdmission::DropReason::Shutdown);  // 0 в н
 | `published_lifecycle_` | `start()`/`stop()` | `std::atomic` (для `status()`) |
 | `shutdown_requested_`, `resync_requested_` | `stop()`, `requestToggle()`, задача | `std::atomic` |
 | `task_` | только `start()`/`stop()` | `api_mutex_`; `task_ == nullptr` означает выполненную финализацию |
-| `teardown_result_` | задача без мьютекса; читается `stop()` только после получения `exit_sem_` | порядок задаёт семафор; `task_exited_` release/acquire дополнительно публикует результат |
+| `teardown_result_` | задача (без мьютекса) и синхронный rollback в `start()` | `std::atomic<esp_err_t>`: store release при публикации, load acquire в `stop()` и `status()` |
 | `task_exited_` | задача | `std::atomic<bool>`, store release; диагностика и публикация результата, не критерий финализации |
 | `exit_sem_` | задача (give), `start()` (сброс), `stop()` (ожидание) | семафор |
 | `rejected_*_busy`, `internal_errors` | `requestToggle()`, задача | `std::atomic` |
@@ -869,6 +885,10 @@ supervise(operation, expected_radio):
     if coordinator_.operation() == None:
         return coordinator_.radioState() == expected_radio ? CONFIRMED : MISMATCH
     if now >= deadline:
+        // Решение принимается под state_mutex_ после повторной проверки:
+        // обработчик мог подтвердить операцию между двумя блокировками.
+        if coordinator_.operation() == None:
+            return radio == expected ? CONFIRMED : MISMATCH
         coordinator_.onOperationTimeout()
         last_error = ESP_ERR_TIMEOUT
         return TIMED_OUT
@@ -935,7 +955,8 @@ stop():
   return finalizeStopLocked()              // release выполнит guard
 
 finalizeStopLocked():                      // всегда под api_mutex_,
-  const esp_err_t result = teardown_result_  // сам мьютекс не освобождает
+  const esp_err_t result =                 // сам мьютекс не освобождает
+      teardown_result_.load(acquire)
   task_ = nullptr
   if result == ESP_OK:
       lifecycle_ = Stopped; published_lifecycle_ = Stopped
@@ -959,6 +980,9 @@ finalizeStopLocked():                      // всегда под api_mutex_,
 - `coordinator_.finishShutdown()` вызывается только при успешном teardown;
 - финализация идемпотентна и выполняется ровно один раз: её признак —
   `task_ == nullptr`;
+- синхронный rollback в `start()` сохраняет результат teardown в
+  `teardown_result_` до возврата ошибки, поэтому последующий `stop()` не
+  сообщает ложный успех: он возвращает сохранённую ошибку;
 - `finalizeStopLocked()` никогда не освобождает `api_mutex_` сам: это
   делает guard вызывающего.
 
@@ -1152,6 +1176,12 @@ enum class ButtonEvent : std::uint8_t {
     `finishShutdown()` → `Stopped`; повторный успешный запуск.
 16. `beginStartup()` + `startupFailed()` → `Stopped`; затем повторный
     успешный запуск.
+17. Операция первоначального запуска: `beginStartup()` и
+    `beginInitialStart()` дают `StartRadio` и `Starting`; до прихода
+    `AP_START` операция не сбрасывается, поэтому служба продолжает ждать, а
+    не считает `Unknown` несовпадением; поздний `AP_START` подтверждает
+    запуск; вне `Starting` и при уже идущей операции метод возвращает
+    `None`.
 
 `test/host/test_button_debouncer.cpp`: сценарии 1–11 предыдущей редакции
 без изменений (совместимость с `{40, 1000, 0}`, границы окна, второй
@@ -1193,6 +1223,11 @@ enum class ButtonEvent : std::uint8_t {
 10. Невалидный Kconfig-пароль (5 символов): проверять при
     `WIFI_SETTINGS_FROM_NVS=n` или после `idf.py erase-flash`; ожидается
     `PasswordTooShort`, AP не поднимается, приложение работает.
+    Дополнительно при `WIFI_SETTINGS_FROM_NVS=n`: SSID длиной 33 и пароль
+    длиной 64 дают явную ошибку запуска без обрезки; после записи валидных
+    значений в NVS запуск проходит. Ключ неправильного типа (например,
+    `chan` строкой) даёт предупреждение и значение Kconfig, а не отказ
+    службы.
 11. Временная инъекция `Unknown` (отладочная сборка, **не входит в
     поставку**). Механизм: в обработчике `WIFI_EVENT` подавляется
     применение подтверждающих событий — первого `AP_START` (для Toggle) и
@@ -1387,6 +1422,18 @@ enum class ButtonEvent : std::uint8_t {
   Host-тесты — 10 из 10. `idf.py build` не выполнен: `idf.py` и `IDF_PATH`
   в окружении отсутствуют; синтаксис `wifi_hal` проверен на
   stub-заголовках.
+- 2026-11-15 — исправления по ревью коммита: введена операция
+  `beginInitialStart()` (первоначальный запуск ждёт `AP_START` вместо
+  мгновенного несовпадения); `failStart()` сохраняет результат
+  синхронного rollback в `teardown_result_`, пишет причину в `last_error_`
+  и приводит координатор к `Stopped` либо к терминальной остановке;
+  `teardown_result_` стал атомарным (release/acquire) для `stop()` и
+  `status()`; значения Kconfig не обрезаются — не поместившаяся строка
+  помечается `KconfigInvalid` и требует валидного переопределения из NVS;
+  `TYPE_MISMATCH` и `INVALID_LENGTH` классифицируются как невалидное
+  значение на обоих этапах чтения строк; `supervise()` принимает решение о
+  таймауте под `state_mutex_` после повторной проверки операции.
+  Host-тесты: 10 из 10.
 - Осталось: `idf.py build`, стендовые проверки раздела 12.
 
 ## Приложение А. Карта замечаний ревью редакции 2

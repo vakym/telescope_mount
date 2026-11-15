@@ -140,8 +140,9 @@ private:
     std::atomic<wifi::Lifecycle> published_lifecycle_{wifi::Lifecycle::Stopped};
 
     TaskHandle_t task_ = nullptr;
-    /// Публикуется задачей без мьютекса до выдачи exit_sem_.
-    esp_err_t teardown_result_ = ESP_OK;
+    /// Результат teardown: пишется задачей и синхронным rollback, читается
+    /// stop()/status() только атомарно.
+    std::atomic<esp_err_t> teardown_result_{ESP_OK};
     std::atomic<bool> task_exited_{false};
     std::atomic<bool> shutdown_requested_{false};
     std::atomic<bool> resync_requested_{false};

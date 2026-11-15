@@ -41,6 +41,45 @@ void normalToggleCycle()
     CHECK(coordinator.starts == 1);
 }
 
+void initialStartOperationHeld()
+{
+    ApCoordinator coordinator;
+    coordinator.beginStartup();
+    CHECK(coordinator.beginInitialStart() == Action::StartRadio);
+    CHECK(coordinator.operation() == Operation::Starting);
+    CHECK(coordinator.radioState() == RadioState::Unknown);
+
+    // AP_START ещё не обработан: операция сохраняется, поэтому служба
+    // продолжает ждать подтверждение, а не считает состояние несовпавшим.
+    CHECK(coordinator.operation() == Operation::Starting);
+    CHECK(coordinator.radioState() == RadioState::Unknown);
+
+    // Поздний AP_START подтверждает запуск.
+    coordinator.onApStarted();
+    CHECK(coordinator.operation() == Operation::None);
+    CHECK(coordinator.radioState() == RadioState::Running);
+    coordinator.startupSucceeded(true);
+    CHECK(coordinator.lifecycle() == Lifecycle::Running);
+
+    // Вне Starting операция первоначального запуска не взводится.
+    CHECK(coordinator.beginInitialStart() == Action::None);
+}
+
+void initialStartGuards()
+{
+    ApCoordinator stopped;
+    stopped.beginStartup();
+    stopped.startupSucceeded(false);
+    CHECK(stopped.beginInitialStart() == Action::None);
+
+    ApCoordinator busy;
+    busy.beginStartup();
+    CHECK(busy.beginInitialStart() == Action::StartRadio);
+    // Повторный вызов не подменяет уже выполняемую операцию.
+    CHECK(busy.beginInitialStart() == Action::None);
+    CHECK(busy.operation() == Operation::Starting);
+}
+
 void startOnBootDisabled()
 {
     ApCoordinator coordinator;
@@ -276,6 +315,8 @@ void startupFailureThenRetry()
 int main()
 {
     normalToggleCycle();
+    initialStartOperationHeld();
+    initialStartGuards();
     startOnBootDisabled();
     operationBusy();
     unknownBlocksToggle();

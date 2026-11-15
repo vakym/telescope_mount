@@ -27,9 +27,13 @@ enum class SettingSource : std::uint8_t {
 };
 
 enum class SettingIssue : std::uint8_t {
-    None,         ///< ключ отсутствует — использован Kconfig
-    InvalidValue, ///< ключ есть, но значение отвергнуто
-    ReadError,    ///< ошибка чтения NVS
+    None,           ///< ключ отсутствует — использован Kconfig
+    InvalidValue,   ///< ключ есть, но значение отвергнуто
+    ReadError,      ///< ошибка чтения NVS
+    /// Значение Kconfig не помещается в буфер или непечатаемо. Не
+    /// обрезается: запуск возможен только при валидном переопределении
+    /// этого поля из NVS.
+    KconfigInvalid,
 };
 
 struct FieldStatus {

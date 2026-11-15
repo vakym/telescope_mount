@@ -33,6 +33,18 @@ void ApCoordinator::startupFailed() noexcept
     operation_ = Operation::None;
 }
 
+Action ApCoordinator::beginInitialStart() noexcept
+{
+    if (lifecycle_ != Lifecycle::Starting || operation_ != Operation::None) {
+        return Action::None;
+    }
+    if (radio_ != RadioState::Unknown) {
+        return Action::None;
+    }
+    operation_ = Operation::Starting;
+    return Action::StartRadio;
+}
+
 Action ApCoordinator::beginToggleOperation() noexcept
 {
     if (lifecycle_ != Lifecycle::Running || operation_ != Operation::None) {
