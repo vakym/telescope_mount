@@ -22,6 +22,7 @@ set(INPUT_DIR "${REPO_ROOT}/components/input")
 set(WIFI_DIR "${REPO_ROOT}/components/wifi")
 set(STATE_DIR "${REPO_ROOT}/components/state")
 set(CONTROL_DIR "${REPO_ROOT}/components/control")
+set(WEB_DIR "${REPO_ROOT}/components/web")
 
 add_library(motion_host STATIC
     "${MOTION_DIR}/src/axis_config.cpp"
@@ -74,6 +75,16 @@ target_include_directories(control_host PUBLIC "${CONTROL_DIR}/include")
 target_link_libraries(control_host PUBLIC state_host motion_host input_host)
 target_compile_options(control_host PRIVATE -Wall -Wextra -Werror)
 
+# web — контракт и автомат веб-слоя: чистый код, тестируется на хосте.
+# Сам HTTP-сервер живёт в web_hal и здесь не собирается.
+add_library(web_host STATIC
+    "${WEB_DIR}/src/state_json.cpp"
+    "${WEB_DIR}/src/server_lifecycle.cpp"
+)
+target_include_directories(web_host PUBLIC "${WEB_DIR}/include")
+target_link_libraries(web_host PUBLIC state_host)
+target_compile_options(web_host PRIVATE -Wall -Wextra -Werror)
+
 if(ENABLE_SANITIZERS)
     add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
     add_link_options(-fsanitize=address,undefined)
@@ -109,6 +120,15 @@ foreach(test_name
         test_ap_lifecycle)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE wifi_host)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+foreach(test_name
+        test_state_json
+        test_server_lifecycle)
+    add_executable(${test_name} "${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE web_host)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
     add_test(NAME ${test_name} COMMAND ${test_name})
 endforeach()

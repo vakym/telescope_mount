@@ -12,6 +12,8 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "motion/types.hpp"
+
 namespace state {
 
 /// Источник намерений управления.
@@ -60,5 +62,11 @@ const char *sourceName(SourceId source) noexcept;
 const char *phaseName(ControlPhase phase) noexcept;
 const char *latchName(LatchCode latch) noexcept;
 const char *denyName(DenyReason reason) noexcept;
+
+/// Имена состояний оси и причин Fault для контракта веб-слоя.
+/// Неизвестное значение (испорченная копия, новое значение без обновления
+/// словаря) даёт "unknown", а не вымышленное состояние.
+const char *axisStateName(motion::AxisState state) noexcept;
+const char *faultReasonName(motion::FaultReason reason) noexcept;
 
 }  // namespace state

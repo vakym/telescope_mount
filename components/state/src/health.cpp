@@ -60,4 +60,51 @@ JoyHealth joyHealth(const JoystickObservation &obs, Micros now_us,
     return JoyHealth::Ok;
 }
 
+const char *freshnessName(Freshness value) noexcept
+{
+    switch (value) {
+        case Freshness::Never:
+            return "never";
+        case Freshness::Fresh:
+            return "fresh";
+        case Freshness::Stale:
+            return "stale";
+    }
+    return "unknown";
+}
+
+const char *axisHealthName(AxisHealth value) noexcept
+{
+    switch (value) {
+        case AxisHealth::Unknown:
+            return "unknown";
+        case AxisHealth::Ok:
+            return "ok";
+        case AxisHealth::Stale:
+            return "stale";
+        case AxisHealth::Fault:
+            return "fault";
+        case AxisHealth::Disabled:
+            return "disabled";
+    }
+    return "unknown";
+}
+
+const char *joyHealthName(JoyHealth value) noexcept
+{
+    switch (value) {
+        case JoyHealth::Unknown:
+            return "unknown";
+        case JoyHealth::Ok:
+            return "ok";
+        case JoyHealth::Invalid:
+            return "invalid";
+        case JoyHealth::Fault:
+            return "fault";
+        case JoyHealth::Stale:
+            return "stale";
+    }
+    return "unknown";
+}
+
 }  // namespace state

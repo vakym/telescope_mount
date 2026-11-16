@@ -58,6 +58,44 @@ const char *latchName(LatchCode latch) noexcept
     return "unknown";
 }
 
+const char *axisStateName(motion::AxisState state) noexcept
+{
+    switch (state) {
+        case motion::AxisState::Disabled:
+            return "disabled";
+        case motion::AxisState::Idle:
+            return "idle";
+        case motion::AxisState::Accelerating:
+            return "accelerating";
+        case motion::AxisState::Cruising:
+            return "cruising";
+        case motion::AxisState::Decelerating:
+            return "decelerating";
+        case motion::AxisState::Holding:
+            return "holding";
+        case motion::AxisState::Released:
+            return "released";
+        case motion::AxisState::Fault:
+            return "fault";
+    }
+    return "unknown";
+}
+
+const char *faultReasonName(motion::FaultReason reason) noexcept
+{
+    switch (reason) {
+        case motion::FaultReason::DeadlineMiss:
+            return "deadline_miss";
+        case motion::FaultReason::ArmFailure:
+            return "arm_failure";
+        case motion::FaultReason::WatchdogTimeout:
+            return "watchdog_timeout";
+        case motion::FaultReason::InvalidState:
+            return "invalid_state";
+    }
+    return "unknown";
+}
+
 const char *denyName(DenyReason reason) noexcept
 {
     switch (reason) {

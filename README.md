@@ -36,6 +36,14 @@
 публикуется в [`docs/plans/0005-state-layer-and-joystick-control.md`](docs/plans/0005-state-layer-and-joystick-control.md).
 `idf.py build` и стендовые проверки этапа ещё не выполнены.
 
+Этап 6 — локальная страница состояния: компоненты `web` (контракт JSON,
+ограниченная сериализация снимка, автомат запуска и останова сервера) и
+`web_hal` (штатный `esp_http_server` на SoftAP, страница встроена в образ,
+задача-супервизор lifecycle). Маршруты только читают состояние: `GET /` и
+`GET /api/state`; команд движения из браузера нет. `idf.py build` и
+host-тесты выполнены, стендовые проверки этапа не выполнялись. План и
+журнал — [`plans/web-status-page-plan.md`](plans/web-status-page-plan.md).
+
 ## Аппаратная часть
 
 | Компонент | Роль |
@@ -181,7 +189,9 @@ telescope_mount/
 │   ├── state/              чистые типы наблюдаемого состояния и свежесть
 │   ├── state_hal/          публикация снимков под мьютексом
 │   ├── control/            чистая логика: mapping, арбитраж, автомат, останов
-│   └── control_hal/        управляющая задача, адаптер MotorService, вход
+│   ├── control_hal/        управляющая задача, адаптер MotorService, вход
+│   ├── web/                контракт JSON, сериализация, автомат сервера
+│   └── web_hal/            esp_http_server, страница в образе, супервизор
 └── test/
     └── host/               CMake + CTest, тесты logic без железа
 ```
@@ -191,9 +201,9 @@ telescope_mount/
 
 ## Тесты логики
 
-Логика движения, обработки джойстика и кнопки, а также логика точки доступа
-(`components/wifi`) не зависит от ESP-IDF и проверяется обычным CMake на
-хосте:
+Логика движения, обработки джойстика и кнопки, логика точки доступа
+(`components/wifi`) и веб-контракт (`components/web`) не зависят от ESP-IDF и
+проверяются обычным CMake на хосте:
 
 ```bash
 cmake -S test/host -B build-host -DCMAKE_BUILD_TYPE=Debug
@@ -232,6 +242,8 @@ OTA и тяжёлое логирование: они срывают распис
 - [`docs/plans/0005-state-layer-and-joystick-control.md`](docs/plans/0005-state-layer-and-joystick-control.md) — слой
   наблюдаемого состояния, арбитраж источников и управление двумя осями от
   джойстика с протоколом останова
+- [`plans/web-status-page-plan.md`](plans/web-status-page-plan.md) — веб-этап 1:
+  локальный HTTP-сервер состояния, контракт JSON и lifecycle сервера
 - [`docs/hardware/overview.md`](docs/hardware/overview.md) — состав железа, питание,
   схема соединений, характеристики приводов и ограничения
 - [`docs/hardware/pinmap.md`](docs/hardware/pinmap.md) — подтверждённая карта GPIO

@@ -32,6 +32,7 @@
 #include "state/channels.hpp"
 #include "state/observation.hpp"
 #include "state_hal/state_hub.hpp"
+#include "web_hal/http_status_service.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
 namespace {
@@ -320,6 +321,37 @@ void logControl(control_hal::ControlService &control)
              static_cast<unsigned long>(status.cycles));
 }
 
+#if CONFIG_WEB_ENABLED
+
+/**
+ * @brief Счётчики HTTP-сервера в общем heartbeat.
+ *
+ * Логов на каждый запрос нет: в контуре шагов они недопустимы. Значения
+ * читаются из атомарных счётчиков, поэтому снимок не транзакционный.
+ */
+void logWeb(web_hal::HttpStatusService &service)
+{
+    const web_hal::HttpStatusCounters status = service.counters();
+    ESP_LOGI(kTag,
+             "web: lifecycle=%u handle=%d requests=%lu page=%lu state=%lu "
+             "failures=%lu overflow=%lu starts=%lu stops=%lu "
+             "start_failures=%lu stop_unconfirmed=%lu last_error=%s",
+             static_cast<unsigned>(status.lifecycle),
+             status.handle_present ? 1 : 0,
+             static_cast<unsigned long>(status.requests_total),
+             static_cast<unsigned long>(status.page_requests),
+             static_cast<unsigned long>(status.state_requests),
+             static_cast<unsigned long>(status.request_failures),
+             static_cast<unsigned long>(status.serialize_overflows),
+             static_cast<unsigned long>(status.starts),
+             static_cast<unsigned long>(status.stops),
+             static_cast<unsigned long>(status.start_failures),
+             static_cast<unsigned long>(status.stop_unconfirmed),
+             esp_err_to_name(status.last_error));
+}
+
+#endif  // CONFIG_WEB_ENABLED
+
 #if CONFIG_APP_MEMORY_DIAGNOSTICS
 
 /**
@@ -556,6 +588,19 @@ extern "C" void app_main(void)
         }
     }
 
+#if CONFIG_WEB_ENABLED
+    // Локальная страница состояния: только чтение хаба и подтверждённого
+    // состояния радио. Объект статический, как access_point и hub, поэтому
+    // кадр стека main не растёт. Ожидания Wi-Fi здесь нет: супервизор
+    // поднимает сервер после подтверждённого AP_START.
+    static web_hal::HttpStatusService web(hub, access_point);
+    const esp_err_t web_err = web.start();
+    if (web_err != ESP_OK) {
+        ESP_LOGE(kTag, "web status page unavailable: %s",
+                 esp_err_to_name(web_err));
+    }
+#endif
+
 #if CONFIG_APP_MEMORY_DIAGNOSTICS
     // Все службы запущены и движения нет: снимок стеков допустим только здесь.
     logHeapSummary("boot");
@@ -571,6 +616,9 @@ extern "C" void app_main(void)
         logControl(control);
         logButtonStats(button_listener.stats());
         logAccessPoint(access_point.status());
+#if CONFIG_WEB_ENABLED
+        logWeb(web);
+#endif
 #if CONFIG_APP_MEMORY_DIAGNOSTICS
         // Только чтение счётчиков: допустимо и во время движения.
         logHeapSummary("periodic");

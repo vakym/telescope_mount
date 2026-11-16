@@ -1,0 +1,114 @@
+menu "Telescope mount web status page"
+
+    config WEB_ENABLED
+        bool "Build local HTTP status page"
+        default y
+        help
+            Включает локальный HTTP-сервер на SoftAP: страницу состояния и
+            read-only JSON. Сервер не содержит маршрутов управления: команды
+            движения, arm/disarm и stop из браузера не поддерживаются.
+
+            Выключение полностью исключает компонент из образа и удобно для
+            сравнения размеров и как аварийный откат.
+
+    config WEB_TASK_STACK
+        int "HTTP server task stack size (bytes)"
+        range 4096 16384
+        default 8192
+        help
+            Стек задачи httpd. Внутри обработчика размещается буфер JSON
+            2048 байт, поэтому меньшее значение допустимо только после
+            измерения минимального остатка стека.
+
+    config WEB_TASK_PRIORITY
+        int "HTTP server task priority"
+        range 1 15
+        default 3
+        help
+            Ниже задачи WiFi (4), джойстика (5) и управления (6). Отправка
+            блокирующая и уступает процессор, но приоритет не является
+            доказательством отсутствия влияния на оси.
+
+    config WEB_TASK_CORE
+        int "HTTP server task core"
+        range 0 1
+        default 0
+
+    config WEB_SUPERVISOR_STACK
+        int "Web supervisor task stack size (bytes)"
+        range 2048 8192
+        default 3072
+
+    config WEB_SUPERVISOR_PRIORITY
+        int "Web supervisor task priority"
+        range 1 15
+        default 2
+
+    config WEB_SUPERVISOR_CORE
+        int "Web supervisor task core"
+        range 0 1
+        default 0
+
+    config WEB_SUPERVISOR_PERIOD_MS
+        int "Web supervisor period (ms)"
+        range 50 5000
+        default 250
+        help
+            Период проверки подтверждённого состояния радио. Только чтение
+            AccessPointStatus: ни логирования, ни остановки радио здесь нет.
+
+    config WEB_START_RETRY_MS
+        int "Retry delay after HTTP start failure (ms)"
+        range 500 60000
+        default 5000
+
+    config WEB_STOP_RETRY_MS
+        int "Retry delay after unconfirmed HTTP stop (ms)"
+        range 200 60000
+        default 1000
+
+    config WEB_STOP_TIMEOUT_MS
+        int "Caller wait for supervisor shutdown (ms)"
+        range 500 30000
+        default 5000
+        help
+            Ограничивает только ожидание вызывающего в stop(). Сам
+            httpd_stop() таймаута не имеет: его длительность измеряется.
+
+    config WEB_MAX_OPEN_SOCKETS
+        int "Maximum open client sockets"
+        range 1 7
+        default 3
+        help
+            esp_http_server резервирует ещё три сокета на прослушивание и
+            управляющие сообщения, поэтому max_open_sockets + 3 не должно
+            превышать CONFIG_LWIP_MAX_SOCKETS.
+
+    config WEB_BACKLOG
+        int "Listen backlog"
+        range 1 8
+        default 2
+
+    config WEB_RECV_TIMEOUT_S
+        int "Socket receive timeout (s)"
+        range 1 30
+        default 2
+        help
+            Таймаут одной операции приёма, не всего запроса.
+
+    config WEB_SEND_TIMEOUT_S
+        int "Socket send timeout (s)"
+        range 1 30
+        default 2
+        help
+            Таймаут одной операции отправки, не всего ответа.
+
+    config WEB_TCP_KEEPALIVE
+        bool "Enable TCP keepalive on client sockets"
+        default y
+        help
+            TCP keepalive (SO_KEEPALIVE и связанные параметры) для
+            обнаружения мёртвых пиров. Не является переключателем HTTP
+            persistent connections и не доказывает общий дедлайн запроса.
+
+endmenu

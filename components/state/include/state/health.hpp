@@ -34,4 +34,9 @@ enum class JoyHealth : std::uint8_t { Unknown, Ok, Invalid, Fault, Stale };
 JoyHealth joyHealth(const JoystickObservation &obs, Micros now_us,
                     Micros max_age_us) noexcept;
 
+/// Текстовые имена для контракта веб-слоя и диагностики.
+const char *freshnessName(Freshness value) noexcept;
+const char *axisHealthName(AxisHealth value) noexcept;
+const char *joyHealthName(JoyHealth value) noexcept;
+
 }  // namespace state

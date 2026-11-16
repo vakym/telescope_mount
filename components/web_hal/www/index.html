@@ -1,0 +1,496 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Telescope mount — состояние</title>
+<style>
+  :root {
+    --bg: #0f1418;
+    --card: #172027;
+    --line: #26323b;
+    --text: #e6edf3;
+    --muted: #8fa1ad;
+    --ok: #4caf7d;
+    --warn: #d9a441;
+    --bad: #d96459;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  header {
+    padding: 14px 16px 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
+  h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: var(--text); }
+  .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+  .badge {
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.timeout { color: var(--warn); border-color: var(--warn); }
+  .badge.error { color: var(--bad); border-color: var(--bad); }
+  main {
+    padding: 14px 16px 24px;
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 12px;
+    max-width: 1000px;
+    margin: 0 auto;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .card.stale { border-style: dashed; border-color: var(--warn); }
+  .card.invalid { border-color: var(--muted); }
+  dl { margin: 0; }
+  dl > div {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 3px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  }
+  dl > div:last-child { border-bottom: none; }
+  dt { color: var(--muted); font-size: 13px; }
+  dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  dd.unknown { color: var(--muted); }
+  .pill {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+    vertical-align: middle;
+  }
+  .pill.ok { color: var(--ok); border-color: var(--ok); }
+  .pill.warn { color: var(--warn); border-color: var(--warn); }
+  .pill.bad { color: var(--bad); border-color: var(--bad); }
+  .pill.muted { color: var(--muted); }
+  details.card > summary {
+    cursor: pointer;
+    font-size: 15px;
+    font-weight: 600;
+    list-style: none;
+  }
+  details.card > summary::-webkit-details-marker { display: none; }
+  details.card > summary::before { content: "▸ "; color: var(--muted); }
+  details.card[open] > summary::before { content: "▾ "; }
+  details.card > dl { margin-top: 10px; }
+  footer {
+    padding: 0 16px 24px;
+    max-width: 1000px;
+    margin: 0 auto;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  footer p { margin: 4px 0; }
+  @media (min-width: 760px) {
+    main { grid-template-columns: 1fr 1fr; }
+    #control-card, details.card, footer { grid-column: 1 / -1; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Telescope mount</h1>
+  <div class="badges">
+    <span id="http-badge" class="badge">HTTP: ожидание</span>
+    <span id="rx-age" class="badge">получено: —</span>
+  </div>
+</header>
+
+<main>
+  <section class="card" id="control-card">
+    <h2>Управление <span id="ctl-health" class="pill">—</span></h2>
+    <dl>
+      <div><dt>Фаза</dt><dd id="phase" class="unknown">—</dd></div>
+      <div><dt>Защёлка</dt><dd id="latch" class="unknown">—</dd></div>
+      <div><dt>Разрешение (permit)</dt><dd id="permit" class="unknown">—</dd></div>
+      <div><dt>Владелец управления</dt><dd id="owner" class="unknown">—</dd></div>
+      <div><dt>Причина отказа</dt><dd id="deny" class="unknown">—</dd></div>
+      <div><dt>Возраст данных</dt><dd id="ctl-age" class="unknown">—</dd></div>
+    </dl>
+  </section>
+
+  <section class="card" id="azimuth-card">
+    <h2>Азимут <span id="az-health" class="pill">—</span></h2>
+    <dl>
+      <div><dt>Состояние</dt><dd id="az-state" class="unknown">—</dd></div>
+      <div><dt>Позиция, полушаги</dt><dd id="az-pos" class="unknown">—</dd></div>
+      <div><dt>Скорость, полушаги/с</dt><dd id="az-rate" class="unknown">—</dd></div>
+      <div><dt>Обмотки под током</dt><dd id="az-energized" class="unknown">—</dd></div>
+      <div><dt>Позиция достоверна</dt><dd id="az-trusted" class="unknown">—</dd></div>
+      <div><dt>Ошибка</dt><dd id="az-fault" class="unknown">—</dd></div>
+      <div><dt>Возраст данных</dt><dd id="az-age" class="unknown">—</dd></div>
+    </dl>
+  </section>
+
+  <section class="card" id="altitude-card">
+    <h2>Высота <span id="alt-health" class="pill">—</span></h2>
+    <dl>
+      <div><dt>Состояние</dt><dd id="alt-state" class="unknown">—</dd></div>
+      <div><dt>Позиция, полушаги</dt><dd id="alt-pos" class="unknown">—</dd></div>
+      <div><dt>Скорость, полушаги/с</dt><dd id="alt-rate" class="unknown">—</dd></div>
+      <div><dt>Обмотки под током</dt><dd id="alt-energized" class="unknown">—</dd></div>
+      <div><dt>Позиция достоверна</dt><dd id="alt-trusted" class="unknown">—</dd></div>
+      <div><dt>Ошибка</dt><dd id="alt-fault" class="unknown">—</dd></div>
+      <div><dt>Возраст данных</dt><dd id="alt-age" class="unknown">—</dd></div>
+    </dl>
+  </section>
+
+  <section class="card" id="joy-card">
+    <h2>Джойстик <span id="joy-health" class="pill">—</span></h2>
+    <dl>
+      <div><dt>Калибровка</dt><dd id="joy-calibrated" class="unknown">—</dd></div>
+      <div><dt>Положение пригодно</dt><dd id="joy-output" class="unknown">—</dd></div>
+      <div><dt>Нейтраль</dt><dd id="joy-neutral" class="unknown">—</dd></div>
+      <div><dt>Ошибка чтения</dt><dd id="joy-fault" class="unknown">—</dd></div>
+      <div><dt>Возраст данных</dt><dd id="joy-age" class="unknown">—</dd></div>
+    </dl>
+  </section>
+
+  <details class="card" id="diag-card">
+    <summary>Диагностика</summary>
+    <dl>
+      <div><dt>Таймауты останова</dt><dd id="d-stop-timeouts" class="unknown">—</dd></div>
+      <div><dt>Эскалации останова</dt><dd id="d-escalations" class="unknown">—</dd></div>
+      <div><dt>Несовпадения подтверждений</dt><dd id="d-ack" class="unknown">—</dd></div>
+      <div><dt>Отказы доставки (аз/выс)</dt><dd id="d-delivery" class="unknown">—</dd></div>
+      <div><dt>Отклонённые намерения</dt><dd id="d-rejected" class="unknown">—</dd></div>
+      <div><dt>Отказы уведомлений</dt><dd id="d-notify" class="unknown">—</dd></div>
+      <div><dt>Занятый слот останова</dt><dd id="d-emergency" class="unknown">—</dd></div>
+      <div><dt>Поздние коррекции (аз/выс)</dt><dd id="d-late" class="unknown">—</dd></div>
+      <div><dt>Поздние перепланы (аз/выс)</dt><dd id="d-replans" class="unknown">—</dd></div>
+      <div><dt>Устаревшие события (аз/выс)</dt><dd id="d-stale-events" class="unknown">—</dd></div>
+      <div><dt>Отклонённые команды (аз/выс)</dt><dd id="d-rejected-commands" class="unknown">—</dd></div>
+      <div><dt>Неудачные опросы осей</dt><dd id="d-read-failures" class="unknown">—</dd></div>
+    </dl>
+  </details>
+</main>
+
+<footer>
+  <p>Страница только читает состояние. Подключение к ней не даёт владения моторами и не заменяет кнопку останова.</p>
+  <p>Позиция — программный счёт полушагов, не измеренный угол. Скорость — полушаги в секунду.</p>
+  <p>Локальный HTTP без шифрования. Секреты точки доступа здесь не публикуются.</p>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  var POLL_MS = 1000;
+  var TIMEOUT_MS = 1500;
+  var BACKOFF_MAX_MS = 8000;
+
+  var inFlight = false;
+  var lastOkAt = 0;
+  var backoff = POLL_MS;
+  var hiddenPause = false;
+  var timerId = null;
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function setText(id, value) {
+    var node = byId(id);
+    if (!node) {
+      return;
+    }
+    node.textContent = String(value);
+    node.classList.remove("unknown");
+  }
+
+  function setUnknown(id) {
+    var node = byId(id);
+    if (!node) {
+      return;
+    }
+    node.textContent = "—";
+    node.classList.add("unknown");
+  }
+
+  function put(id, value) {
+    if (value === null || value === undefined) {
+      setUnknown(id);
+    } else {
+      setText(id, value);
+    }
+  }
+
+  function fmtBool(value) {
+    if (value === true) {
+      return "да";
+    }
+    if (value === false) {
+      return "нет";
+    }
+    return null;
+  }
+
+  function putBool(id, value) {
+    put(id, fmtBool(value));
+  }
+
+  function fmtAge(ms) {
+    if (typeof ms !== "number" || !isFinite(ms)) {
+      return null;
+    }
+    if (ms < 1000) {
+      return ms + " мс";
+    }
+    return (ms / 1000).toFixed(1) + " с";
+  }
+
+  function fmtRate(value) {
+    if (typeof value !== "number" || !isFinite(value)) {
+      return null;
+    }
+    return value.toFixed(1);
+  }
+
+  function setHealth(id, health) {
+    var node = byId(id);
+    if (!node) {
+      return;
+    }
+    node.textContent = health ? String(health) : "—";
+    var cls = "pill";
+    if (health === "ok") {
+      cls += " ok";
+    } else if (health === "stale") {
+      cls += " warn";
+    } else if (health === "unknown") {
+      cls += " muted";
+    } else if (health) {
+      cls += " bad";
+    }
+    node.className = cls;
+  }
+
+  function setCardState(cardId, health) {
+    var card = byId(cardId);
+    if (!card) {
+      return;
+    }
+    card.classList.toggle("stale", health === "stale");
+    card.classList.toggle("invalid", health === "unknown");
+  }
+
+  function setHttp(kind) {
+    var node = byId("http-badge");
+    if (!node) {
+      return;
+    }
+    if (kind === "ok") {
+      node.textContent = "HTTP: ответ получен";
+      node.className = "badge ok";
+    } else if (kind === "timeout") {
+      node.textContent = "HTTP: таймаут";
+      node.className = "badge timeout";
+    } else if (kind === "error") {
+      node.textContent = "HTTP: ошибка";
+      node.className = "badge error";
+    } else {
+      node.textContent = "HTTP: ожидание";
+      node.className = "badge";
+    }
+  }
+
+  function renderAxis(prefix, cardId, axis) {
+    var health = axis ? axis.health : null;
+    setHealth(prefix + "-health", health);
+    setCardState(cardId, health);
+    if (!axis || axis.valid !== true) {
+      ["-state", "-pos", "-rate", "-energized", "-trusted", "-fault", "-age"]
+        .forEach(function (suffix) { setUnknown(prefix + suffix); });
+      return;
+    }
+    put(prefix + "-state", axis.state);
+    put(prefix + "-pos", axis.position_half_steps);
+    put(prefix + "-rate", fmtRate(axis.rate_half_steps_s));
+    putBool(prefix + "-energized", axis.energized);
+    putBool(prefix + "-trusted", axis.trusted);
+    if (axis.fault === true) {
+      put(prefix + "-fault", axis.fault_reason || "да");
+    } else if (axis.fault === false) {
+      setText(prefix + "-fault", "нет");
+    } else {
+      setUnknown(prefix + "-fault");
+    }
+    put(prefix + "-age", fmtAge(axis.age_ms));
+  }
+
+  function renderControl(control) {
+    var health = control ? control.health : null;
+    setHealth("ctl-health", health);
+    setCardState("control-card", health);
+    if (!control || control.valid !== true) {
+      ["phase", "latch", "permit", "owner", "deny", "ctl-age"]
+        .forEach(setUnknown);
+      return;
+    }
+    put("phase", control.phase);
+    put("latch", control.latch);
+    putBool("permit", control.permit);
+    put("owner", control.owner);
+    put("deny", control.deny);
+    put("ctl-age", fmtAge(control.age_ms));
+  }
+
+  function renderJoystick(joystick) {
+    var health = joystick ? joystick.health : null;
+    setHealth("joy-health", health);
+    setCardState("joy-card", health);
+    if (!joystick || joystick.valid !== true) {
+      ["joy-calibrated", "joy-output", "joy-neutral", "joy-fault", "joy-age"]
+        .forEach(setUnknown);
+      return;
+    }
+    putBool("joy-calibrated", joystick.calibrated);
+    putBool("joy-output", joystick.output_valid);
+    putBool("joy-neutral", joystick.neutral);
+    putBool("joy-fault", joystick.fault);
+    put("joy-age", fmtAge(joystick.age_ms));
+  }
+
+  function axisPair(axes, key) {
+    if (!axes || !axes.azimuth || !axes.altitude) {
+      return null;
+    }
+    var a = axes.azimuth[key];
+    var b = axes.altitude[key];
+    if (a === null || a === undefined || b === null || b === undefined) {
+      return null;
+    }
+    return a + " / " + b;
+  }
+
+  function renderDiag(diag, axes) {
+    if (!diag || diag.stop_timeouts === null || diag.stop_timeouts === undefined) {
+      ["d-stop-timeouts", "d-escalations", "d-ack", "d-delivery", "d-rejected",
+       "d-notify", "d-emergency", "d-late", "d-replans", "d-stale-events",
+       "d-rejected-commands", "d-read-failures"].forEach(setUnknown);
+      return;
+    }
+    put("d-stop-timeouts", diag.stop_timeouts);
+    put("d-escalations", diag.escalations);
+    put("d-ack", diag.ack_mismatches);
+    put("d-delivery", Array.isArray(diag.delivery_failures)
+      ? diag.delivery_failures.join(" / ") : null);
+    put("d-rejected", diag.rejected_intents);
+    put("d-notify", diag.notify_failures);
+    put("d-emergency", diag.emergency_slot_busy);
+    put("d-late", axisPair(axes, "late_corrections"));
+    put("d-replans", axisPair(axes, "late_replans"));
+    put("d-stale-events", axisPair(axes, "stale_events"));
+    put("d-rejected-commands", axisPair(axes, "rejected_commands"));
+    put("d-read-failures", axisPair(axes, "read_failures"));
+  }
+
+  function render(data) {
+    var axes = data ? data.axes : null;
+    renderControl(data ? data.control : null);
+    renderAxis("az", "azimuth-card", axes ? axes.azimuth : null);
+    renderAxis("alt", "altitude-card", axes ? axes.altitude : null);
+    renderJoystick(data ? data.joystick : null);
+    renderDiag(data ? data.diag : null, axes);
+  }
+
+  function markStale(kind) {
+    setHttp(kind);
+    ["control-card", "azimuth-card", "altitude-card", "joy-card"]
+      .forEach(function (id) {
+        var card = byId(id);
+        if (card) {
+          card.classList.add("stale");
+        }
+      });
+  }
+
+  function schedule(ms) {
+    if (timerId !== null) {
+      clearTimeout(timerId);
+    }
+    timerId = setTimeout(poll, ms);
+  }
+
+  function poll() {
+    timerId = null;
+    if (hiddenPause || document.hidden) {
+      return;
+    }
+    if (inFlight) {
+      schedule(POLL_MS);
+      return;
+    }
+
+    inFlight = true;
+    var controller = new AbortController();
+    var abortTimer = setTimeout(function () { controller.abort(); }, TIMEOUT_MS);
+
+    fetch("/api/state", { cache: "no-store", signal: controller.signal })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("http " + response.status);
+        }
+        return response.json();
+      })
+      .then(function (data) {
+        lastOkAt = Date.now();
+        backoff = POLL_MS;
+        setHttp("ok");
+        render(data);
+        schedule(POLL_MS);
+      })
+      .catch(function (error) {
+        var kind = error && error.name === "AbortError" ? "timeout" : "error";
+        markStale(kind);
+        backoff = Math.min(backoff * 2, BACKOFF_MAX_MS);
+        schedule(backoff);
+      })
+      .finally(function () {
+        clearTimeout(abortTimer);
+        inFlight = false;
+      });
+  }
+
+  function tickAges() {
+    if (!lastOkAt) {
+      return;
+    }
+    var seconds = Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
+    setText("rx-age", "получено: " + seconds + " с назад");
+  }
+
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) {
+      hiddenPause = true;
+      return;
+    }
+    hiddenPause = false;
+    backoff = POLL_MS;
+    schedule(0);
+  });
+
+  setHttp("wait");
+  setInterval(tickAges, 1000);
+  schedule(0);
+}());
+</script>
+</body>
+</html>
