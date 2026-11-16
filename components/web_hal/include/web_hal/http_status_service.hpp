@@ -28,7 +28,9 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "state_hal/state_hub.hpp"
+#include "web/retry_gate.hpp"
 #include "web/server_controller.hpp"
+#include "web/shutdown_protocol.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
 namespace web_hal {
@@ -107,8 +109,7 @@ private:
     void run();
 
     void superviseOnce();
-    bool retryElapsed(TickType_t now) const noexcept;
-    void refreshRetryStamp(TickType_t now) noexcept;
+    std::uint32_t retryIntervalTicks() const noexcept;
     void publishState() noexcept;
 
     web::StartOutcome portStart();
@@ -128,14 +129,23 @@ private:
 
     /// Пишет и читает только задача-супервизор.
     httpd_handle_t handle_ = nullptr;
-    TickType_t retry_at_ = 0;
+    /// Каждая выполненная попытка заново отсчитывает интервал повтора.
+    web::RetryGate retry_gate_{};
 
     StaticSemaphore_t exit_sem_storage_{};
     SemaphoreHandle_t exit_sem_ = nullptr;
+    /// Задача подтверждает завершение и ждёт удаления владельцем.
+    StaticSemaphore_t delete_gate_storage_{};
+    SemaphoreHandle_t delete_gate_ = nullptr;
     TaskHandle_t task_ = nullptr;
 
+    /// Сериализует start()/stop(); модель вызовов задана явно.
+    StaticSemaphore_t call_mutex_storage_{};
+    SemaphoreHandle_t call_mutex_ = nullptr;
+    /// Только первый stop() разрешает уведомление задачи.
+    web::ShutdownProtocol shutdown_protocol_{};
+
     std::atomic<bool> shutdown_requested_{false};
-    std::atomic<bool> task_exited_{false};
     /// Результат текущего останова, выставляется финализацией.
     std::atomic<esp_err_t> shutdown_result_{ESP_OK};
 

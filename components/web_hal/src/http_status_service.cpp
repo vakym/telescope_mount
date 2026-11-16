@@ -62,9 +62,13 @@ HttpStatusService::HttpStatusService(state_hal::StateHub &hub,
       access_point_(access_point),
       port_(*this),
       controller_(port_),
-      exit_sem_storage_{}
+      exit_sem_storage_{},
+      delete_gate_storage_{},
+      call_mutex_storage_{}
 {
     exit_sem_ = xSemaphoreCreateBinaryStatic(&exit_sem_storage_);
+    delete_gate_ = xSemaphoreCreateBinaryStatic(&delete_gate_storage_);
+    call_mutex_ = xSemaphoreCreateMutexStatic(&call_mutex_storage_);
 }
 
 HttpStatusService::~HttpStatusService()
@@ -79,63 +83,103 @@ HttpStatusService::~HttpStatusService()
 
 esp_err_t HttpStatusService::start()
 {
-    if (exit_sem_ == nullptr) {
+    if (exit_sem_ == nullptr || delete_gate_ == nullptr ||
+        call_mutex_ == nullptr) {
         return ESP_ERR_NO_MEM;
     }
+
+    // start()/stop() сериализованы: модель вызовов задана явно.
+    (void)xSemaphoreTake(call_mutex_, portMAX_DELAY);
+
+    esp_err_t result = ESP_OK;
     if (task_ != nullptr) {
-        return ESP_ERR_INVALID_STATE;
+        result = ESP_ERR_INVALID_STATE;
+    } else {
+        // Второй экземпляр запрещён: владение могло сохраниться после
+        // неподтверждённого останова.
+        switch (controller_.state()) {
+            case web::ServerState::Stopped:
+            case web::ServerState::StartFailed:
+                break;
+            case web::ServerState::Starting:
+            case web::ServerState::Running:
+            case web::ServerState::Stopping:
+            case web::ServerState::StopFailed:
+                result = ESP_ERR_INVALID_STATE;
+                break;
+        }
     }
 
-    // Второй экземпляр запрещён: владение могло сохраниться после
-    // неподтверждённого останова.
-    switch (controller_.state()) {
-        case web::ServerState::Stopped:
-        case web::ServerState::StartFailed:
-            break;
-        case web::ServerState::Starting:
-        case web::ServerState::Running:
-        case web::ServerState::Stopping:
-        case web::ServerState::StopFailed:
-            return ESP_ERR_INVALID_STATE;
+    if (result == ESP_OK) {
+        shutdown_requested_.store(false, std::memory_order_release);
+        shutdown_result_.store(ESP_OK, std::memory_order_release);
+        retry_gate_.clear();
+        shutdown_protocol_.reset();
+        while (xSemaphoreTake(exit_sem_, 0) == pdTRUE) {
+        }
+
+        const BaseType_t created = xTaskCreatePinnedToCore(
+            taskEntry, "web_sup", CONFIG_WEB_SUPERVISOR_STACK, this,
+            CONFIG_WEB_SUPERVISOR_PRIORITY, &task_,
+            CONFIG_WEB_SUPERVISOR_CORE);
+        if (created != pdPASS) {
+            task_ = nullptr;
+            result = ESP_ERR_NO_MEM;
+        }
     }
 
-    shutdown_requested_.store(false, std::memory_order_release);
-    task_exited_.store(false, std::memory_order_release);
-    shutdown_result_.store(ESP_OK, std::memory_order_release);
-    retry_at_ = 0;
-    while (xSemaphoreTake(exit_sem_, 0) == pdTRUE) {
-    }
-
-    const BaseType_t created = xTaskCreatePinnedToCore(
-        taskEntry, "web_sup", CONFIG_WEB_SUPERVISOR_STACK, this,
-        CONFIG_WEB_SUPERVISOR_PRIORITY, &task_, CONFIG_WEB_SUPERVISOR_CORE);
-    if (created != pdPASS) {
-        task_ = nullptr;
-        return ESP_ERR_NO_MEM;
-    }
-    return ESP_OK;
+    (void)xSemaphoreGive(call_mutex_);
+    return result;
 }
 
 esp_err_t HttpStatusService::stop()
 {
+    if (call_mutex_ == nullptr) {
+        return ESP_ERR_NO_MEM;
+    }
+    (void)xSemaphoreTake(call_mutex_, portMAX_DELAY);
+
     if (task_ == nullptr) {
         // Супервизора нет: результат определяется сохранённым владением.
-        return controller_.state() == web::ServerState::StopFailed ? ESP_FAIL
-                                                                   : ESP_OK;
+        const esp_err_t idle =
+            controller_.state() == web::ServerState::StopFailed ? ESP_FAIL
+                                                                : ESP_OK;
+        (void)xSemaphoreGive(call_mutex_);
+        return idle;
     }
 
-    shutdown_requested_.store(true, std::memory_order_release);
-    (void)xTaskNotifyGive(task_);
+    // Только первый запрос разрешает уведомление. Повтор после таймаута
+    // лишь ожидает подтверждение: уведомлять самоуничтожавшуюся задачу
+    // небезопасно, а её handle мог уже освободиться.
+    const web::ShutdownProtocol::WaitAction action =
+        shutdown_protocol_.beginStop();
+    if (action == web::ShutdownProtocol::WaitAction::Completed) {
+        const esp_err_t done = shutdown_result_.load(std::memory_order_acquire);
+        (void)xSemaphoreGive(call_mutex_);
+        return done;
+    }
+    if (action == web::ShutdownProtocol::WaitAction::NotifyThenWait) {
+        shutdown_requested_.store(true, std::memory_order_release);
+        (void)xTaskNotifyGive(task_);
+    }
 
     if (xSemaphoreTake(exit_sem_, pdMS_TO_TICKS(CONFIG_WEB_STOP_TIMEOUT_MS)) !=
         pdTRUE) {
-        // Задача не подтвердила завершение; task_ сохраняется, владение не
-        // теряется, повторный вызов продолжит попытку.
+        // Владение сохраняется; следующий вызов только продолжит ожидание.
+        shutdown_protocol_.onWaitTimeout();
+        (void)xSemaphoreGive(call_mutex_);
         return ESP_ERR_TIMEOUT;
     }
 
+    // Подтверждение получено: задача ждёт удаления. Удаляет владелец, чтобы
+    // сохранённый handle не стал недействительным до возврата из stop().
+    vTaskDelete(task_);
     task_ = nullptr;
-    return shutdown_result_.load(std::memory_order_acquire);
+    shutdown_protocol_.onCompleted();
+
+    const esp_err_t result = shutdown_result_.load(std::memory_order_acquire);
+    (void)xSemaphoreGive(call_mutex_);
+    return result;
 }
 
 HttpStatusCounters HttpStatusService::counters() const
@@ -174,27 +218,13 @@ void HttpStatusService::publishState() noexcept
                             std::memory_order_relaxed);
 }
 
-bool HttpStatusService::retryElapsed(TickType_t now) const noexcept
+std::uint32_t HttpStatusService::retryIntervalTicks() const noexcept
 {
-    if (!controller_.retryPending() || retry_at_ == 0) {
-        return true;
-    }
     const std::uint32_t interval_ms =
         controller_.state() == web::ServerState::StartFailed
             ? CONFIG_WEB_START_RETRY_MS
             : CONFIG_WEB_STOP_RETRY_MS;
-    return (now - retry_at_) >= pdMS_TO_TICKS(interval_ms);
-}
-
-void HttpStatusService::refreshRetryStamp(TickType_t now) noexcept
-{
-    if (!controller_.retryPending()) {
-        retry_at_ = 0;
-        return;
-    }
-    if (retry_at_ == 0) {
-        retry_at_ = now;
-    }
+    return static_cast<std::uint32_t>(pdMS_TO_TICKS(interval_ms));
 }
 
 void HttpStatusService::superviseOnce()
@@ -202,16 +232,32 @@ void HttpStatusService::superviseOnce()
     const wifi_hal::AccessPointStatus status = access_point_.status();
     const bool ap_running = status.radio_state == wifi::RadioState::Running;
     const bool ap_stopping = status.operation == wifi::Operation::Stopping;
-    const TickType_t now = xTaskGetTickCount();
+
+    const bool retry_allowed = retry_gate_.elapsed(
+        static_cast<std::uint32_t>(xTaskGetTickCount()),
+        retryIntervalTicks());
 
     const web::ServerAction action =
-        controller_.tick(ap_running, ap_stopping, retryElapsed(now));
+        controller_.tick(ap_running, ap_stopping, retry_allowed);
     if (action == web::ServerAction::Start) {
         starts_.fetch_add(1, std::memory_order_relaxed);
     } else if (action == web::ServerAction::Stop) {
         stops_.fetch_add(1, std::memory_order_relaxed);
     }
-    refreshRetryStamp(now);
+
+    // Новый отсчёт начинается по завершении реально выполненной попытки, а не
+    // при первом появлении флага: иначе повтор шёл бы каждый тик.
+    if (action != web::ServerAction::None) {
+        if (controller_.retryPending()) {
+            retry_gate_.noteAttempt(
+                static_cast<std::uint32_t>(xTaskGetTickCount()));
+        } else {
+            retry_gate_.clear();
+        }
+    } else if (!controller_.retryPending()) {
+        retry_gate_.clear();
+    }
+
     publishState();
 }
 
@@ -254,9 +300,11 @@ void HttpStatusService::run()
         vTaskDelay(pdMS_TO_TICKS(CONFIG_WEB_STOP_RETRY_MS));
     }
 
-    task_exited_.store(true, std::memory_order_release);
+    // Подтверждение завершения. Задачу удаляет владелец в stop(): удаление
+    // самой собой сделало бы сохранённый handle недействительным раньше, чем
+    // вызывающий об этом узнает. До удаления задача не обращается к this.
     (void)xSemaphoreGive(exit_sem_);
-    vTaskDelete(nullptr);
+    (void)xSemaphoreTake(delete_gate_, portMAX_DELAY);
 }
 
 web::StartOutcome HttpStatusService::portStart()

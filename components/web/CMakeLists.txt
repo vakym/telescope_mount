@@ -12,6 +12,8 @@ idf_component_register(
         "src/state_json.cpp"
         "src/server_lifecycle.cpp"
         "src/server_controller.cpp"
+        "src/shutdown_protocol.cpp"
+        "src/retry_gate.cpp"
     INCLUDE_DIRS "include"
     REQUIRES state motion input
 )
