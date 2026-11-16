@@ -3,16 +3,18 @@
  * @brief Lifecycle локального HTTP-сервера, маршруты и счётчики.
  *
  * Владение:
- *  - handle_ изменяется только задачей-супервизором;
- *  - start()/stop() из другой задачи не касаются handle_, а только запускают
- *    или останавливают задачу;
+ *  - handle_ изменяется только внутри portStart()/portStop(), вызываемых из
+ *    задачи-супервизора через web::ServerController;
+ *  - start()/stop() из другой задачи не касаются handle_;
  *  - обработчики не вызывают моторный слой и не удерживают мьютекс хаба во
  *    время отправки: копия снимается один раз в начале обработчика.
  *
  * Останов: `Stopped` достигается только при подтверждённом завершении. В
  * ESP-IDF 6.1 `httpd_stop()` возвращает `ESP_FAIL`, если управляющее
  * сообщение не отправлено, и при этом сервер продолжает работать; признаком
- * освобождения ресурсов служит только `ESP_OK`.
+ * освобождения ресурсов служит только `ESP_OK`. Поэтому финализация задачи
+ * идёт через `ServerController::shutdownOnce()`: при неподтверждённом
+ * останове владение сохраняется, и объект не уничтожается.
  */
 
 #include "web_hal/http_status_service.hpp"
@@ -56,15 +58,22 @@ static_assert(CONFIG_WEB_MAX_OPEN_SOCKETS + 3 <= CONFIG_LWIP_MAX_SOCKETS,
 
 HttpStatusService::HttpStatusService(state_hal::StateHub &hub,
                                      wifi_hal::WifiApService &access_point)
-    : hub_(hub), access_point_(access_point), exit_sem_storage_{}
+    : hub_(hub),
+      access_point_(access_point),
+      port_(*this),
+      controller_(port_),
+      exit_sem_storage_{}
 {
     exit_sem_ = xSemaphoreCreateBinaryStatic(&exit_sem_storage_);
 }
 
 HttpStatusService::~HttpStatusService()
 {
-    while (stop() == ESP_ERR_TIMEOUT) {
-        vTaskDelay(pdMS_TO_TICKS(10));
+    // Пока сервер жив, его обработчики ссылаются на этот объект. Поэтому
+    // уничтожение допустимо только после подтверждённого завершения.
+    while (stop() != ESP_OK) {
+        ESP_LOGE(kTag, "destructor: HTTP shutdown not confirmed, waiting");
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 
@@ -77,9 +86,23 @@ esp_err_t HttpStatusService::start()
         return ESP_ERR_INVALID_STATE;
     }
 
+    // Второй экземпляр запрещён: владение могло сохраниться после
+    // неподтверждённого останова.
+    switch (controller_.state()) {
+        case web::ServerState::Stopped:
+        case web::ServerState::StartFailed:
+            break;
+        case web::ServerState::Starting:
+        case web::ServerState::Running:
+        case web::ServerState::Stopping:
+        case web::ServerState::StopFailed:
+            return ESP_ERR_INVALID_STATE;
+    }
+
     shutdown_requested_.store(false, std::memory_order_release);
     task_exited_.store(false, std::memory_order_release);
-    retry_pending_ = false;
+    shutdown_result_.store(ESP_OK, std::memory_order_release);
+    retry_at_ = 0;
     while (xSemaphoreTake(exit_sem_, 0) == pdTRUE) {
     }
 
@@ -96,7 +119,9 @@ esp_err_t HttpStatusService::start()
 esp_err_t HttpStatusService::stop()
 {
     if (task_ == nullptr) {
-        return ESP_OK;
+        // Супервизора нет: результат определяется сохранённым владением.
+        return controller_.state() == web::ServerState::StopFailed ? ESP_FAIL
+                                                                   : ESP_OK;
     }
 
     shutdown_requested_.store(true, std::memory_order_release);
@@ -104,12 +129,13 @@ esp_err_t HttpStatusService::stop()
 
     if (xSemaphoreTake(exit_sem_, pdMS_TO_TICKS(CONFIG_WEB_STOP_TIMEOUT_MS)) !=
         pdTRUE) {
-        // Задача не подтвердила завершение; lifecycle остаётся прежним.
+        // Задача не подтвердила завершение; task_ сохраняется, владение не
+        // теряется, повторный вызов продолжит попытку.
         return ESP_ERR_TIMEOUT;
     }
+
     task_ = nullptr;
-    return last_error_.load(std::memory_order_acquire) == ESP_OK ? ESP_OK
-                                                                : ESP_FAIL;
+    return shutdown_result_.load(std::memory_order_acquire);
 }
 
 HttpStatusCounters HttpStatusService::counters() const
@@ -117,8 +143,7 @@ HttpStatusCounters HttpStatusService::counters() const
     HttpStatusCounters snapshot;
     snapshot.lifecycle = published_lifecycle_.load(std::memory_order_acquire);
     snapshot.handle_present = handle_present_.load(std::memory_order_acquire);
-    snapshot.requests_total =
-        requests_total_.load(std::memory_order_relaxed);
+    snapshot.requests_total = requests_total_.load(std::memory_order_relaxed);
     snapshot.page_requests = page_requests_.load(std::memory_order_relaxed);
     snapshot.state_requests = state_requests_.load(std::memory_order_relaxed);
     snapshot.request_failures =
@@ -139,21 +164,55 @@ void HttpStatusService::taskEntry(void *arg)
     static_cast<HttpStatusService *>(arg)->run();
 }
 
-void HttpStatusService::publishLifecycle() noexcept
+void HttpStatusService::publishState() noexcept
 {
-    published_lifecycle_.store(lifecycle_.state(), std::memory_order_release);
+    published_lifecycle_.store(controller_.state(), std::memory_order_release);
+    handle_present_.store(handle_ != nullptr, std::memory_order_release);
+    const web::ServerLifecycle &lifecycle = controller_.lifecycle();
+    start_failures_.store(lifecycle.start_failures, std::memory_order_relaxed);
+    stop_unconfirmed_.store(lifecycle.stop_unconfirmed,
+                            std::memory_order_relaxed);
 }
 
 bool HttpStatusService::retryElapsed(TickType_t now) const noexcept
 {
-    if (!retry_pending_) {
+    if (!controller_.retryPending() || retry_at_ == 0) {
         return true;
     }
     const std::uint32_t interval_ms =
-        lifecycle_.state() == web::ServerState::StartFailed
+        controller_.state() == web::ServerState::StartFailed
             ? CONFIG_WEB_START_RETRY_MS
             : CONFIG_WEB_STOP_RETRY_MS;
     return (now - retry_at_) >= pdMS_TO_TICKS(interval_ms);
+}
+
+void HttpStatusService::refreshRetryStamp(TickType_t now) noexcept
+{
+    if (!controller_.retryPending()) {
+        retry_at_ = 0;
+        return;
+    }
+    if (retry_at_ == 0) {
+        retry_at_ = now;
+    }
+}
+
+void HttpStatusService::superviseOnce()
+{
+    const wifi_hal::AccessPointStatus status = access_point_.status();
+    const bool ap_running = status.radio_state == wifi::RadioState::Running;
+    const bool ap_stopping = status.operation == wifi::Operation::Stopping;
+    const TickType_t now = xTaskGetTickCount();
+
+    const web::ServerAction action =
+        controller_.tick(ap_running, ap_stopping, retryElapsed(now));
+    if (action == web::ServerAction::Start) {
+        starts_.fetch_add(1, std::memory_order_relaxed);
+    } else if (action == web::ServerAction::Stop) {
+        stops_.fetch_add(1, std::memory_order_relaxed);
+    }
+    refreshRetryStamp(now);
+    publishState();
 }
 
 void HttpStatusService::run()
@@ -162,51 +221,45 @@ void HttpStatusService::run()
         if (shutdown_requested_.load(std::memory_order_acquire)) {
             break;
         }
-
-        const wifi_hal::AccessPointStatus status = access_point_.status();
-        const bool ap_running = status.radio_state == wifi::RadioState::Running;
-        const bool ap_stopping = status.operation == wifi::Operation::Stopping;
-        const bool retry = retryElapsed(xTaskGetTickCount());
-
-        const web::ServerAction action =
-            lifecycle_.update(ap_running, ap_stopping, retry);
-        if (action == web::ServerAction::Start) {
-            retry_pending_ = false;
-            starts_.fetch_add(1, std::memory_order_relaxed);
-            doStart();
-        } else if (action == web::ServerAction::Stop) {
-            retry_pending_ = false;
-            stops_.fetch_add(1, std::memory_order_relaxed);
-            doStop();
-        }
-        publishLifecycle();
-
+        superviseOnce();
         (void)ulTaskNotifyTake(
             pdTRUE, pdMS_TO_TICKS(CONFIG_WEB_SUPERVISOR_PERIOD_MS));
     }
 
-    // Терминальная финализация. Если останов уже признан недоказуемым,
-    // handle не разыменовывается: второй экземпляр при этом не создаётся.
-    if (handle_ != nullptr &&
-        lifecycle_.state() != web::ServerState::StopFailed) {
-        const esp_err_t err = httpd_stop(handle_);
-        if (err == ESP_OK) {
-            handle_ = nullptr;
-            handle_present_.store(false, std::memory_order_release);
-        } else {
-            last_error_.store(err, std::memory_order_release);
-            ESP_LOGE(kTag, "final httpd stop unconfirmed: %s",
-                     esp_err_to_name(err));
+    // Финализация идёт теми же правилами, что и обычный останов. Завершение
+    // задачи само по себе не доказывает освобождение HTTP-сервера.
+    for (;;) {
+        const web::ShutdownOutcome outcome = controller_.shutdownOnce();
+        publishState();
+
+        if (outcome == web::ShutdownOutcome::Clean) {
+            shutdown_result_.store(ESP_OK, std::memory_order_release);
+            break;
         }
+
+        shutdown_result_.store(last_error_.load(std::memory_order_acquire),
+                               std::memory_order_release);
+
+        if (outcome == web::ShutdownOutcome::Terminal) {
+            // Останов не подтверждён и повтор невозможен: handle сохраняется,
+            // объект уничтожать нельзя. Задача остаётся владельцем.
+            ESP_LOGE(kTag,
+                     "shutdown: server stop not confirmed, ownership retained");
+            for (;;) {
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
+        }
+
+        ESP_LOGW(kTag, "shutdown: retrying server stop");
+        vTaskDelay(pdMS_TO_TICKS(CONFIG_WEB_STOP_RETRY_MS));
     }
-    publishLifecycle();
 
     task_exited_.store(true, std::memory_order_release);
     (void)xSemaphoreGive(exit_sem_);
     vTaskDelete(nullptr);
 }
 
-void HttpStatusService::doStart()
+web::StartOutcome HttpStatusService::portStart()
 {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.stack_size = CONFIG_WEB_TASK_STACK;
@@ -222,19 +275,21 @@ void HttpStatusService::doStart()
     config.send_wait_timeout =
         static_cast<std::uint16_t>(CONFIG_WEB_SEND_TIMEOUT_S);
     config.lru_purge_enable = true;
-    config.keep_alive_enable = CONFIG_WEB_TCP_KEEPALIVE;
+    // Булева Kconfig-опция в выключенном состоянии не определена, поэтому
+    // прямое присваивание сломало бы сборку при WEB_TCP_KEEPALIVE=n.
+#if CONFIG_WEB_TCP_KEEPALIVE
+    config.keep_alive_enable = true;
+#else
+    config.keep_alive_enable = false;
+#endif
 
     httpd_handle_t handle = nullptr;
     esp_err_t err = httpd_start(&handle, &config);
     if (err != ESP_OK || handle == nullptr) {
         last_error_.store(err == ESP_OK ? ESP_FAIL : err,
                           std::memory_order_release);
-        lifecycle_.startFailed();
-        start_failures_.fetch_add(1, std::memory_order_relaxed);
-        retry_pending_ = true;
-        retry_at_ = xTaskGetTickCount();
         ESP_LOGE(kTag, "httpd start failed: %s", esp_err_to_name(err));
-        return;
+        return web::StartOutcome::Failed;
     }
 
     httpd_uri_t page = {};
@@ -268,68 +323,49 @@ void HttpStatusService::doStart()
         last_error_.store(err, std::memory_order_release);
         const esp_err_t stop_err = httpd_stop(handle);
         if (stop_err == ESP_OK) {
-            lifecycle_.startFailed();
-            start_failures_.fetch_add(1, std::memory_order_relaxed);
-            retry_pending_ = true;
-            retry_at_ = xTaskGetTickCount();
-            return;
+            return web::StartOutcome::Failed;
         }
-        // Завершение отката не подтверждено: сервер мог остаться живым,
-        // поэтому StartFailed недопустим. Handle сохраняется.
+        // Завершение отката не подтверждено: владение сохраняется.
         handle_ = handle;
-        handle_present_.store(true, std::memory_order_release);
-        lifecycle_.startFailedWithLiveServer(stop_err == ESP_FAIL);
-        stop_unconfirmed_.fetch_add(1, std::memory_order_relaxed);
         if (stop_err == ESP_FAIL) {
-            retry_pending_ = true;
-            retry_at_ = xTaskGetTickCount();
-        } else {
-            ESP_LOGE(kTag, "start rollback stop failed: %s",
-                     esp_err_to_name(stop_err));
+            return web::StartOutcome::FailedServerLiveRetryable;
         }
-        return;
+        ESP_LOGE(kTag, "start rollback stop failed: %s",
+                 esp_err_to_name(stop_err));
+        return web::StartOutcome::FailedServerLiveTerminal;
     }
 
     handle_ = handle;
-    handle_present_.store(true, std::memory_order_release);
     last_error_.store(ESP_OK, std::memory_order_release);
-    lifecycle_.startSucceeded();
     ESP_LOGI(kTag, "http status page started: port=%u sockets=%u stack=%u",
              static_cast<unsigned>(config.server_port),
              static_cast<unsigned>(config.max_open_sockets),
              static_cast<unsigned>(config.stack_size));
+    return web::StartOutcome::Started;
 }
 
-void HttpStatusService::doStop()
+web::StopOutcome HttpStatusService::portStop()
 {
     if (handle_ == nullptr) {
-        lifecycle_.stopSucceeded();
-        return;
+        return web::StopOutcome::Confirmed;
     }
 
     const esp_err_t err = httpd_stop(handle_);
     if (err == ESP_OK) {
         handle_ = nullptr;
-        handle_present_.store(false, std::memory_order_release);
         last_error_.store(ESP_OK, std::memory_order_release);
-        lifecycle_.stopSucceeded();
         ESP_LOGI(kTag, "http status page stopped");
-        return;
+        return web::StopOutcome::Confirmed;
     }
 
     last_error_.store(err, std::memory_order_release);
-    stop_unconfirmed_.fetch_add(1, std::memory_order_relaxed);
-    // ESP_FAIL означает «сервер жив, handle валиден»: повтор допустим.
-    lifecycle_.stopUnconfirmed(err == ESP_FAIL);
     if (err == ESP_FAIL) {
-        retry_pending_ = true;
-        retry_at_ = xTaskGetTickCount();
-        ESP_LOGW(kTag, "httpd stop unconfirmed, retry scheduled");
-    } else {
-        // Неизвестный код: handle больше не используется.
-        ESP_LOGE(kTag, "httpd stop failed with unexpected code: %s",
-                 esp_err_to_name(err));
+        // По контракту сервер жив и handle валиден: повтор допустим.
+        ESP_LOGW(kTag, "httpd stop unconfirmed, retry allowed");
+        return web::StopOutcome::NotConfirmedRetryable;
     }
+    ESP_LOGE(kTag, "httpd stop failed: %s", esp_err_to_name(err));
+    return web::StopOutcome::NotConfirmedTerminal;
 }
 
 esp_err_t HttpStatusService::pageHandler(httpd_req_t *req)

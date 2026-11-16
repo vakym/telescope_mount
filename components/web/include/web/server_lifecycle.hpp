@@ -42,6 +42,9 @@ public:
     ServerAction update(bool ap_running, bool ap_stopping,
                         bool retry_elapsed) noexcept;
 
+    /// Начать останов из Running (например, при финализации). Идемпотентно.
+    void beginStop() noexcept;
+
     /// Сервер создан и все маршруты зарегистрированы.
     void startSucceeded() noexcept;
 

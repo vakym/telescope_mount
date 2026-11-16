@@ -11,6 +11,7 @@ idf_component_register(
     SRCS
         "src/state_json.cpp"
         "src/server_lifecycle.cpp"
+        "src/server_controller.cpp"
     INCLUDE_DIRS "include"
     REQUIRES state motion input
 )

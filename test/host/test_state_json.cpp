@@ -149,6 +149,7 @@ void testPopulated()
     CHECK(has(out.text(), "\"owner\":\"joystick\""));
     CHECK(has(out.text(), "\"generation\":3"));
     CHECK(axisHas(out.text(), "\"azimuth\"", "\"health\":\"ok\""));
+    CHECK(axisHas(out.text(), "\"azimuth\"", "\"freshness\":\"fresh\""));
     CHECK(axisHas(out.text(), "\"azimuth\"", "\"state\":\"idle\""));
     CHECK(axisHas(out.text(), "\"azimuth\"", "\"position_half_steps\":\"4096\""));
     CHECK(axisHas(out.text(), "\"azimuth\"", "\"age_ms\":12"));
@@ -170,7 +171,7 @@ void testEmptySnapshot()
     const Out out(snapshot, sizeof(out.buffer));
     CHECK(out.result == web::SerializeResult::Ok);
     CHECK(structurally_sane(out.text()));
-    CHECK(has(out.text(), "\"control\":{\"valid\":false,\"health\":\"unknown\",\"age_ms\":null"));
+    CHECK(has(out.text(), "\"control\":{\"valid\":false,\"health\":\"unknown\",\"freshness\":\"never\",\"age_ms\":null"));
     CHECK(has(out.text(), "\"phase\":null"));
     CHECK(has(out.text(), "\"permit\":null"));
     CHECK(has(out.text(), "\"position_half_steps\":null"));
@@ -297,6 +298,7 @@ void testAges()
     Out never_out(snapshot, sizeof(never_out.buffer));
     CHECK(axisHas(never_out.text(), "\"azimuth\"", "\"age_ms\":null"));
     CHECK(axisHas(never_out.text(), "\"azimuth\"", "\"health\":\"stale\""));
+    CHECK(axisHas(never_out.text(), "\"azimuth\"", "\"freshness\":\"never\""));
 
     SystemSnapshot future = makePopulated();
     future.axis[0].meta.polled_us = kNow + 1000;
@@ -316,11 +318,13 @@ void testFreshnessBoundary()
     at_limit.axis[0].meta.polled_us = kNow - 500'000;  // ровно порог
     Out limit_out(at_limit, sizeof(limit_out.buffer));
     CHECK(axisHas(limit_out.text(), "\"azimuth\"", "\"health\":\"ok\""));
+    CHECK(axisHas(limit_out.text(), "\"azimuth\"", "\"freshness\":\"fresh\""));
 
     SystemSnapshot over_limit = makePopulated();
     over_limit.axis[0].meta.polled_us = kNow - 500'001;
     Out over_out(over_limit, sizeof(over_out.buffer));
     CHECK(axisHas(over_out.text(), "\"azimuth\"", "\"health\":\"stale\""));
+    CHECK(axisHas(over_out.text(), "\"azimuth\"", "\"freshness\":\"stale\""));
     // Устаревший блок сохраняет значения.
     CHECK(axisHas(over_out.text(), "\"azimuth\"",
                   "\"position_half_steps\":\"4096\""));
@@ -370,13 +374,13 @@ void testControlAgeAndHealth()
     SystemSnapshot fresh = makePopulated();
     Out fresh_out(fresh, sizeof(fresh_out.buffer));
     CHECK(has(fresh_out.text(),
-              "\"control\":{\"valid\":true,\"health\":\"ok\",\"age_ms\":20"));
+              "\"control\":{\"valid\":true,\"health\":\"ok\",\"freshness\":\"fresh\",\"age_ms\":20"));
 
     SystemSnapshot stale = makePopulated();
     stale.control.meta.polled_us = kNow - 2'000'000;
     Out stale_out(stale, sizeof(stale_out.buffer));
     CHECK(has(stale_out.text(),
-              "\"control\":{\"valid\":true,\"health\":\"stale\",\"age_ms\":2000"));
+              "\"control\":{\"valid\":true,\"health\":\"stale\",\"freshness\":\"stale\",\"age_ms\":2000"));
     // Устаревшее управление не обнуляет фазу.
     CHECK(has(stale_out.text(), "\"phase\":\"waiting_neutral\""));
 
@@ -384,7 +388,50 @@ void testControlAgeAndHealth()
     no_poll.control.meta.polled_us = state::kNever;
     Out no_poll_out(no_poll, sizeof(no_poll_out.buffer));
     CHECK(has(no_poll_out.text(), "\"health\":\"unknown\""));
+    CHECK(has(no_poll_out.text(), "\"freshness\":\"never\""));
     CHECK(has(no_poll_out.text(), "\"phase\":\"waiting_neutral\""));
+}
+
+/**
+ * @brief Комбинации: состояние важнее возраста, но устаревание видно отдельно.
+ *
+ * Существующие axisHealth()/joyHealth() отдают приоритет fault/disabled/invalid,
+ * поэтому признак свежести публикуется отдельным полем.
+ */
+void testHealthAndFreshnessCombinations()
+{
+    SystemSnapshot disabled = makePopulated();
+    disabled.axis[0].status.state = motion::AxisState::Disabled;
+    disabled.axis[0].meta.polled_us = kNow - 2'000'000;
+    Out disabled_out(disabled, sizeof(disabled_out.buffer));
+    CHECK(axisHas(disabled_out.text(), "\"azimuth\"", "\"health\":\"disabled\""));
+    CHECK(axisHas(disabled_out.text(), "\"azimuth\"", "\"freshness\":\"stale\""));
+    CHECK(axisHas(disabled_out.text(), "\"azimuth\"", "\"age_ms\":2000"));
+
+    SystemSnapshot fault = makePopulated();
+    fault.axis[0].status.state = motion::AxisState::Fault;
+    fault.axis[0].status.has_fault = true;
+    fault.axis[0].status.fault_reason = motion::FaultReason::DeadlineMiss;
+    fault.axis[0].meta.polled_us = kNow - 2'000'000;
+    Out fault_out(fault, sizeof(fault_out.buffer));
+    CHECK(axisHas(fault_out.text(), "\"azimuth\"", "\"health\":\"fault\""));
+    CHECK(axisHas(fault_out.text(), "\"azimuth\"", "\"freshness\":\"stale\""));
+    CHECK(axisHas(fault_out.text(), "\"azimuth\"",
+                  "\"fault_reason\":\"deadline_miss\""));
+
+    SystemSnapshot joystick = makePopulated();
+    joystick.joystick.output_valid = false;
+    joystick.joystick.meta.measured_us = kNow - 2'000'000;
+    Out joy_out(joystick, sizeof(joy_out.buffer));
+    CHECK(has(joy_out.text(), "\"health\":\"invalid\""));
+    CHECK(has(joy_out.text(), "\"freshness\":\"stale\""));
+    CHECK(has(joy_out.text(), "\"neutral\":true"));
+
+    SystemSnapshot invalidated = makePopulated();
+    invalidated.axis[0].meta.valid = false;
+    Out invalidated_out(invalidated, sizeof(invalidated_out.buffer));
+    CHECK(axisHas(invalidated_out.text(), "\"azimuth\"",
+                  "\"freshness\":\"never\""));
 }
 
 void testCapacity()
@@ -474,6 +521,7 @@ int main()
     testInvalidatedBlocks();
     testUnknownEnums();
     testControlAgeAndHealth();
+    testHealthAndFreshnessCombinations();
     testCapacity();
     testWorstCaseFits();
     return TEST_RESULT();

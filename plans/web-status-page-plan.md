@@ -2,8 +2,10 @@
 
 - Статус: **проект плана, реализация не выполнялась**
 - Дата: 2026-11-15
-- Анализируемый коммит: `c6ee7d983578b2ed57a37ff09aa44cb5c35886fa`
-  (`refs/heads/main`, прочитан из `.git/refs/heads/main`)
+- Анализируемый коммит исследования: `c6ee7d983578b2ed57a37ff09aa44cb5c35886fa`
+- Базовая точка реализации: `723eba2a62ab0061b116f972a3b1a35615aa2407`
+  («web server») — первый вариант зафиксирован владельцем; правки по ревью
+  в коммит не включены
 - Стек: **ESP-IDF 6.1.0** + CMake, C++17, FreeRTOS, классический ESP32
   (ESP32-WROOM-32)
 - Предыдущие этапы: [0004](../docs/plans/0004-wifi-access-point.md)
@@ -285,7 +287,7 @@ Operation::Stopping`, чтобы страница получила закрыт�
   "schema": 1,
   "generated_ms": 123456,
   "control": {
-    "valid": true, "health": "ok", "age_ms": 40,
+    "valid": true, "health": "ok", "freshness": "fresh", "age_ms": 40,
     "phase": "waiting_neutral",
     "latch": "none",
     "deny": "stale_input",
@@ -296,7 +298,7 @@ Operation::Stopping`, чтобы страница получила закрыт�
   },
   "axes": {
     "azimuth": {
-      "valid": true, "health": "ok", "age_ms": 12,
+      "valid": true, "health": "ok", "freshness": "fresh", "age_ms": 12,
       "state": "idle",
       "position_half_steps": "4096",
       "rate_half_steps_s": 0.0,
@@ -309,7 +311,7 @@ Operation::Stopping`, чтобы страница получила закрыт�
     "altitude": { "...": "тот же набор полей" }
   },
   "joystick": {
-    "valid": true, "health": "ok", "age_ms": 8,
+    "valid": true, "health": "ok", "freshness": "fresh", "age_ms": 8,
     "calibrated": true, "output_valid": true,
     "neutral": true, "fault": false, "read_errors": 0
   },
@@ -328,13 +330,15 @@ Operation::Stopping`, чтобы страница получила закрыт�
 | `schema` | number | `1` | всегда есть |
 | `generated_ms` | number | мс монотонного времени ESP32 (`esp_timer`) | всегда есть |
 | `control.health` | string \| null | `unknown`, `ok`, `stale` — по возрасту `meta.polled_us` | `null` |
+| `control.freshness` | string \| null | только возраст: `never`, `fresh`, `stale` | `"never"` |
 | `control.age_ms` | number \| null | мс от `meta.polled_us` до `generated_ms` | `null` при `kNever`/обратном времени |
 | `control.phase` | string \| null | `disarmed`, `waiting_neutral`, `enabling`, `active`, `stopping` | `null` при `valid=false` |
 | `control.latch` | string \| null | `none`, `motor_fault`, `delivery_failed`, `stop_unconfirmed`, `config_invalid` | `null` |
 | `control.deny` | string \| null | `state::denyName()` | `null` |
 | `control.owner` | string \| null | `none`, `joystick`, `browser`, `automation` | `null` |
 | `control.generation` | number | uint32, беззнаковый счётчик | `null` |
-| `axes.<id>.health` | string \| null | `unknown`, `ok`, `stale`, `fault`, `disabled` | `null` |
+| `axes.<id>.health` | string \| null | `unknown`, `ok`, `stale`, `fault`, `disabled` — состояние важнее возраста | `null` |
+| `axes.<id>.freshness` | string \| null | только возраст по `meta.polled_us`: `never`, `fresh`, `stale` | `"never"` |
 | `axes.<id>.age_ms` | number \| null | мс от `meta.polled_us` до `generated_ms` | `null` при `kNever`/обратном времени |
 | `axes.<id>.state` | string \| null | `disabled`, `idle`, `accelerating`, `cruising`, `decelerating`, `holding`, `released`, `fault` | `null` |
 | `axes.<id>.position_half_steps` | **string** \| null | int64 полушагов; строка, чтобы не зависеть от точности `Number` | `null` |
@@ -343,7 +347,8 @@ Operation::Stopping`, чтобы страница получила закрыт�
 | `axes.<id>.fault_reason` | string \| null | `deadline_miss`, `arm_failure`, `watchdog_timeout`, `invalid_state`; только при `fault=true`, иначе `null` | `null` |
 | `axes.<id>.late_corrections`, `late_replans`, `stale_events`, `rejected_commands` | **string** | uint64 счётчики | `null` |
 | `axes.<id>.read_failures` | number | uint32 | `null` |
-| `joystick.health` | string \| null | `unknown`, `ok`, `invalid`, `fault`, `stale` | `null` |
+| `joystick.health` | string \| null | `unknown`, `ok`, `invalid`, `fault`, `stale` — состояние важнее возраста | `null` |
+| `joystick.freshness` | string \| null | только возраст по `meta.measured_us`: `never`, `fresh`, `stale` | `"never"` |
 | `joystick.age_ms` | number \| null | мс от `meta.measured_us` | `null` |
 | `joystick.calibrated`, `output_valid`, `neutral`, `fault` | bool \| null | из `JoystickObservation` | `null` |
 | `diag.*` | number / array[2] | uint32 счётчики `ControlObservation` | всегда числа (0 при отсутствии публикации не выдаётся: при `control.valid=false` значения `null`) |
@@ -361,9 +366,13 @@ Operation::Stopping`, чтобы страница получила закрыт�
 6. Неизвестное значение enum (испорченная копия, новое значение без
    обновления контракта) публикуется как `"unknown"`, а не как вымышленная
    фаза.
-7. Устаревание не обнуляет поля: оно выражается `health: "stale"` и
+7. Устаревание не обнуляет поля: оно выражается `freshness: "stale"` и
    `age_ms`. Обнуление зарезервировано за «значения никогда не было».
-8. `control` получает возраст по `meta.polled_us`, потому что `measured_us`
+8. `health` и `freshness` — независимые признаки. Существующие
+   `axisHealth()`/`joyHealth()` отдают приоритет `fault`/`disabled`/`invalid`,
+   поэтому устаревшая ось в Fault имеет `health: "fault"` и одновременно
+   `freshness: "stale"`. Приоритеты функций здоровья не меняются.
+9. `control` получает возраст по `meta.polled_us`, потому что `measured_us`
    у него всегда `kNever`; управляющая логика не меняется.
 
 ### 4.4 Бюджет размера и сериализация
@@ -443,11 +452,11 @@ sequenceDiagram
 
 | Блок | Содержимое |
 |---|---|
-| Заголовок | «Telescope mount»; бейдж HTTP: `ответ получен` / `таймаут` / `ошибка` |
+| Заголовок | «Telescope mount»; бейдж HTTP: `ответ получен` / `таймаут` / `ошибка`; отдельная пометка «последние полученные данные устарели: N с без ответа» |
 | Время | «на устройстве обновлено N мс назад» (по `age_ms`/`generated_ms`) и «получено N с назад» (часы браузера), раздельно |
-| Управление | фаза, защёлка, `permit`, владелец, причина отказа, возраст и свежесть блока управления отдельной пометкой |
-| Ось азимута / высоты | состояние, позиция в полушагах, скорость в полушагах/с, `energized`, `position_trusted`, `health` |
-| Джойстик | валидность, свежесть, калибровка, нейтраль, fault |
+| Управление | фаза, защёлка, `permit`, владелец, причина отказа, возраст, два индикатора: `health` и `freshness` |
+| Ось азимута / высоты | состояние, позиция в полушагах, скорость в полушагах/с, `energized`, `position_trusted`, `health` и `freshness` |
+| Джойстик | валидность, калибровка, нейтраль, fault, `health` и `freshness` |
 | Свёрнутый блок «Диагностика» (`<details>`) | счётчики ошибок: остановы, эскалации, несовпадения ack, отказы доставки, отклонённые намерения, `late_*`, `stale_events`, `rejected_commands` |
 
 Отображаемые состояния:
@@ -455,7 +464,7 @@ sequenceDiagram
 | Состояние | Как выглядит |
 |---|---|
 | нет данных (`valid=false` или `null`) | прочерк «—» и явная пометка «нет данных»; **никаких нулей вместо неизвестного** |
-| источник устарел (`health = stale`), HTTP отвечает | блок получает класс `stale` и пометку «устарело»; бейдж HTTP остаётся «ответ получен» — это разные диагнозы |
+| источник устарел (`freshness = stale`), HTTP отвечает | блок получает класс `stale`, индикатор `freshness` становится жёлтым; бейдж HTTP остаётся «ответ получен» — это разные диагнозы |
 | последний `fetch` не удался дольше 3 с | бейдж HTTP «нет ответа»/«таймаут», все значения дополнительно помечаются устаревшими, но не стираются |
 | ошибка устройства (500) | бейдж HTTP «ошибка устройства», данные помечаются устаревшими |
 | связь восстановлена | на следующем успешном ответе пометки снимаются сами, перезагрузка не нужна |
@@ -489,9 +498,13 @@ flowchart TD
 `inFlight`); повтор только через `setTimeout` и только после завершения
 предыдущего; `AbortController` с таймаутом 1.5 с; экспоненциальный backoff до
 8 с; при `document.hidden` опрос приостанавливается и возобновляется по
-`visibilitychange`; таймеры не накапливаются; через 3 с без успеха старые
-значения помечаются устаревшими; сравнение часов браузера и `esp_timer` не
-выполняется вовсе — устройство само сообщает `age_ms` и `health`.
+`visibilitychange`; таймеры не накапливаются; через 3 с без успешного ответа
+включается транспортная пометка «последние полученные данные устарели» со
+значениями, которые остаются видимыми; пометка снимается только после
+успешного получения и обработки нового снимка; при возврате вкладки свежесть
+пересчитывается немедленно, не дожидаясь фонового таймера; сравнение часов
+браузера и `esp_timer` не выполняется вовсе — устройство само сообщает
+`age_ms`, `health` и `freshness`.
 
 ---
 
@@ -686,10 +699,10 @@ v6.1; результаты — раздел 11.
 | Временные выделения в обработчике | 0 | сериализация и копия — на стеке; структуры сессии выделяются при accept |
 | Временные выделения самой библиотеки | `malloc`/`free` буфера заголовков ответа на каждый `httpd_resp_send` | подтверждено по исходнику v6.1; размер ограничен строкой статуса и заголовками, влияние на фрагментацию измеряется |
 
-Измеренный итог (раздел 12): **+73 008 Б `.bin`**, из них Flash Code
-+44 500 Б и Flash Data +28 464 Б; `.bss` +200 Б. Стеки задач (8192 + 3072)
+Измеренный итог (раздел 12): **+76 064 Б `.bin`**, из них Flash Code
++45 200 Б и Flash Data +30 832 Б; `.bss` +216 Б. Стеки задач (8192 + 3072)
 выделяются из heap во время работы сервера. Свободное место в разделе
-`factory` (1 МиБ) после включения сервера — **134 400 Б (13%)**. Запас
+`factory` (1 МиБ) после включения сервера — **131 344 Б (13%)**. Запас
 достаточен для ресурсов страницы, но сессионные буферы на каждое соединение
 по-прежнему не измерялись на устройстве.
 
@@ -834,6 +847,23 @@ heartbeat-лог `main` (без нового маршрута API и без ло
 9. `apStopping=true` в `Running` → ранний `Stop`.
 10. Быстрая последовательность вкл/выкл/вкл: не более одного активного
     перехода, счётчики согласованы, второй `Start` не выдаётся.
+11. `startFailedWithLiveServer`: откат останова не подтверждён → `Stopping`
+    с повтором либо терминальный `StopFailed`.
+
+`test_server_controller.cpp` — обёртка сервиса, а не только автомат:
+
+1. `start` → `Running`; обычный останов → `Stopped`; повторный `start`
+   снова выдаёт `Start` (регрессия «start → stop → start не восстанавливает
+   сервер»).
+2. Финализация при работающем сервере: `shutdownOnce()` → `Clean`,
+   lifecycle `Stopped`, порт остановлен.
+3. Неподтверждённый останов: `shutdownOnce()` → `Retry`, состояние
+   `Stopping`, сервер жив; после подтверждения → `Clean`.
+4. Терминальный останов: `Terminal`, `StopFailed`, владение сохранено,
+   новый `Start` не выдаётся, повтор шага не освобождает handle.
+5. Ошибка запуска и откат частичного старта: `Failed`,
+   `FailedServerLiveRetryable`, `FailedServerLiveTerminal`.
+6. Нет AP → `Start` не выдаётся; финализация без сервера не вызывает останов.
 
 ### 9.2 Интеграционные проверки на устройстве
 
@@ -859,6 +889,8 @@ heartbeat-лог `main` (без нового маршрута API и без ло
    с включённым и выключенным `WEB_ENABLED`).
 10. Отсутствие записи в NVS/flash от HTTP: сервис не пишет ничего;
     проверяется по коду и по логу.
+11. Матрица сборок: `WEB_ENABLED=n`, `WEB_TCP_KEEPALIVE=n` и рабочая
+    конфигурация — все собираются без ошибок.
 11. Неподтверждённый останов (инъекция ошибки в обёртке остановки): сервис
     переходит в `StopFailed`, новый `Start` не выполняется, второй экземпляр
     сервера не создаётся, состояние видно в диагностике.
@@ -1038,9 +1070,12 @@ URI найден, а метод не совпал. Обработчик ошиб
 
 ## 12. Журнал реализации
 
-- Статус: **код реализован, сборка и host-тесты выполнены**; стендовые и
-  интеграционные проверки не выполнялись (устройство недоступно)
-- Коммиты и push не выполнялись
+- Статус: **код реализован, правки по ревью внесены, сборка и host-тесты
+  выполнены**; стендовые и интеграционные проверки не выполнялись
+  (устройство недоступно)
+- Первый вариант реализации зафиксирован владельцем в коммите `723eba2`.
+  Правки по ревью (раздел 12.5) остаются незакоммиченными; push не
+  выполнялся
 
 ### 12.1 Изменения по файлам
 
@@ -1048,12 +1083,12 @@ URI найден, а метод не совпал. Обработчик ошиб
 |---|---|
 | [`components/state/include/state/channels.hpp`](../components/state/include/state/channels.hpp), [`src/channels.cpp`](../components/state/src/channels.cpp) | аддитивно: `axisStateName()`, `faultReasonName()` |
 | [`components/state/include/state/health.hpp`](../components/state/include/state/health.hpp), [`src/health.cpp`](../components/state/src/health.cpp) | аддитивно: `freshnessName()`, `axisHealthName()`, `joyHealthName()` |
-| [`components/web/`](../components/web) | новый компонент: `web/state_json.hpp`, `src/state_json.cpp`, `web/server_lifecycle.hpp`, `src/server_lifecycle.cpp`, `CMakeLists.txt` |
+| [`components/web/`](../components/web) | новый компонент: `web/state_json.hpp`, `src/state_json.cpp`, `web/server_lifecycle.hpp`, `src/server_lifecycle.cpp`, `web/server_controller.hpp`, `src/server_controller.cpp`, `CMakeLists.txt` |
 | [`components/web_hal/`](../components/web_hal) | новый компонент: `Kconfig.projbuild`, `CMakeLists.txt`, `include/web_hal/http_status_service.hpp`, `src/http_status_service.cpp`, `www/index.html` |
 | [`main/CMakeLists.txt`](../main/CMakeLists.txt) | `web_hal` в `REQUIRES` |
 | [`main/main.cpp`](../main/main.cpp) | статический `HttpStatusService`, запуск после служб, строка `web:` в heartbeat |
 | [`test/host/CMakeLists.txt`](../test/host/CMakeLists.txt) | библиотека `web_host`, тесты `test_state_json`, `test_server_lifecycle` |
-| [`test/host/test_state_json.cpp`](../test/host/test_state_json.cpp), [`test/host/test_server_lifecycle.cpp`](../test/host/test_server_lifecycle.cpp) | новые host-тесты |
+| [`test/host/test_state_json.cpp`](../test/host/test_state_json.cpp), [`test/host/test_server_lifecycle.cpp`](../test/host/test_server_lifecycle.cpp), [`test/host/test_server_controller.cpp`](../test/host/test_server_controller.cpp) | новые host-тесты, включая обёртку сервиса |
 | [`README.md`](../README.md) | статус этапа, структура, тесты, ссылка на план |
 
 Не изменялись: `sdkconfig.defaults`, разметка flash, `wifi`/`wifi_hal`,
@@ -1069,35 +1104,42 @@ URI найден, а метод не совпал. Обработчик ошиб
 | Конфигурация | `.bin` | Total image | Flash Code | Flash Data | DRAM | `.bss` |
 |---|---|---|---|---|---|---|
 | `WEB_ENABLED=n` | 841 168 Б | 841 052 Б | 615 618 Б | 117 484 Б | 39 019 Б | 20 936 Б |
-| `WEB_ENABLED=y` | 914 176 Б | 914 052 Б | 660 118 Б | 145 948 Б | 39 219 Б | 21 136 Б |
-| **Разница** | **+73 008 Б** | +73 000 Б | +44 500 Б | +28 464 Б | +200 Б | +200 Б |
+| `WEB_ENABLED=y` | 917 232 Б | 917 120 Б | 660 818 Б | 148 316 Б | 39 235 Б | 21 152 Б |
+| **Разница** | **+76 064 Б** | +76 068 Б | +45 200 Б | +30 832 Б | +216 Б | +216 Б |
 
-Компоненты при включённой опции: `libweb_hal.a` — 19 164 Б (Flash Code
-2 421, Flash Data 16 743), `libesp_http_server.a` — 10 182 Б (Flash Code
+Компоненты при включённой опции: `libweb_hal.a` — 21 431 Б (Flash Code
+2 437, Flash Data 18 994), `libesp_http_server.a` — 10 182 Б (Flash Code
 9 782, Flash Data 400). Остальное приращение кода — связанные с HTTP
 компоненты IDF.
 
 Свободное место в разделе `factory` (1 МиБ): 207 408 Б до включения,
-**134 400 Б (13%)** после.
+**131 344 Б (13%)** после.
 
-Предупреждения сборки: `-Wunused-function` для `waitForMoveCompletion` в
-`main.cpp` — существовало до изменений. Файлы `web`, `web_hal`, `state` и
-изменённые строки `main.cpp` собираются без предупреждений.
+Матрица сборок проверена: `WEB_ENABLED=n`, `WEB_TCP_KEEPALIVE=n` и рабочая
+конфигурация собираются без ошибок.
+
+Предупреждения полной сборки: два `-Wunused-function` в файлах, которые этим
+этапом не менялись — `isMoving` в `control_service.cpp` и
+`waitForMoveCompletion` в `main.cpp`. Файлы `web`, `web_hal` и `state`
+собираются без предупреждений.
 
 ### 12.3 Host-тесты
 
 `cmake -S test/host -B build-host && cmake --build build-host && ctest --test-dir build-host`:
-**24 из 24 тестов проходят**, включая `test_state_json` и
-`test_server_lifecycle`. Напечатанный тестом худший документ:
-**1 484 Б из 2 048 Б** (`kMaxStateJsonBytes`), то есть запас 564 Б.
+**25 из 25 тестов проходят**, включая `test_state_json`,
+`test_server_lifecycle` и `test_server_controller`. Напечатанный тестом
+худший документ: **1 564 Б из 2 048 Б** (`kMaxStateJsonBytes`), запас 484 Б.
 
 Покрыто тестами: имена enum и неизвестные значения, единицы, политика null
 (невалидированный блок, устаревший блок, отдельное непригодное число),
-NaN/±Inf, `-0.0`, `-0.1`, границы округления, `±10000.0` и значения вне
-допуска, `FLT_MAX`, INT64/uint64/uint32 максимумы, `kNever` и обратное
-время, порог свежести ровно и на 1 мкс больше, три ёмкости буфера,
-подтверждённый и неподтверждённый останов, откат частичного старта,
-быстрое переключение AP.
+комбинации `health`/`freshness` (`disabled` + `stale`, `fault` + `stale`,
+джойстик `invalid` + `stale`), NaN/±Inf, `-0.0`, `-0.1`, границы округления,
+`±10000.0` и значения вне допуска, `FLT_MAX`, INT64/uint64/uint32 максимумы,
+`kNever` и обратное время, порог свежести ровно и на 1 мкс больше, три
+ёмкости буфера; подтверждённый и неподтверждённый останов, откат частичного
+старта, быстрое переключение AP; обёртка сервиса: `start → stop → start`,
+финализация через `shutdownOnce()`, повтор и терминальный останов с
+сохранением владения.
 
 ### 12.4 Что не выполнено
 
@@ -1110,5 +1152,15 @@ NaN/±Inf, `-0.0`, `-0.1`, границы округления, `±10000.0` и �
    выполнялся.
 4. HTTP persistent connections и реакция на `Connection: close` не
    проверены на практике.
-5. Сжатие страницы не включалось: 16 615 Б в образе, польза сжатия не
+5. Сжатие страницы не включалось: 18 810 Б в образе, польза сжатия не
    измерялась.
+
+### 12.5 Правки по итогам ревью
+
+| № | Замечание | Что изменено |
+|---|---|---|
+| P1 | Финализация обходила автомат: `run()` завершал задачу независимо от результата `httpd_stop()`, lifecycle оставался `Running`, последовательность `start → stop → start` не восстанавливала сервер | Введён чистый [`web::ServerController`](../components/web/include/web/server_controller.hpp) с портом `ServerPort`: решения о запуске, останове и владении принимаются там и тестируются на хосте. `HttpStatusService::run()` завершает работу только через `shutdownOnce()`; `Clean` — подтверждённый останов, `Retry` — повтор с интервалом, `Terminal` — задача остаётся владельцем и не даёт уничтожить объект. `stop()` возвращает результат текущего останова (`shutdown_result_`), а не ранее сохранённую ошибку; `start()` запрещён при сохранённом владении. Обработчики по-прежнему не могут обратиться к уничтоженному объекту |
+| P1 | Не было тестов обёртки | Добавлен [`test_server_controller.cpp`](../test/host/test_server_controller.cpp): `start → stop → start`, финализация при работающем сервере, неподтверждённый и терминальный останов, откат частичного старта, запуск без AP |
+| P2 | `keep_alive_enable = CONFIG_WEB_TCP_KEEPALIVE` ломает сборку при выключенной опции | Присваивание заменено на `#if CONFIG_WEB_TCP_KEEPALIVE`; сборка `WEB_ENABLED=y` + `WEB_TCP_KEEPALIVE=n` проверена |
+| P2 | После паузы вкладки старые данные выглядят свежими, транспортное устаревание не отображалось | Добавлена транспортная пометка «последние полученные данные устарели: N с без ответа»: включается через 3 с без успешного ответа, пересчитывается в `tickAges()` и сразу при `visibilitychange`, снимается только после успешного снимка; карточки получают класс `transport-stale`, значения сохраняются |
+| P2 | `health` скрывал устаревание за `fault`/`disabled`/`invalid` | В контракт добавлено отдельное поле `freshness` (`never`/`fresh`/`stale`) для `control`, обеих осей и джойстика; `health` и `freshness` показываются двумя индикаторами. Приоритеты `axisHealth()`/`joyHealth()` не изменены; добавлены комбинированные тесты |

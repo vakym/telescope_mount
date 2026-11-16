@@ -39,6 +39,8 @@
   .badge.ok { color: var(--ok); border-color: var(--ok); }
   .badge.timeout { color: var(--warn); border-color: var(--warn); }
   .badge.error { color: var(--bad); border-color: var(--bad); }
+  .badge.warn { color: var(--warn); border-color: var(--warn); }
+  .hidden { display: none; }
   main {
     padding: 14px 16px 24px;
     display: grid;
@@ -55,6 +57,7 @@
   }
   .card.stale { border-style: dashed; border-color: var(--warn); }
   .card.invalid { border-color: var(--muted); }
+  .card.transport-stale { opacity: 0.72; }
   dl { margin: 0; }
   dl > div {
     display: flex;
@@ -75,6 +78,7 @@
     border: 1px solid var(--line);
     color: var(--muted);
     vertical-align: middle;
+    margin-left: 4px;
   }
   .pill.ok { color: var(--ok); border-color: var(--ok); }
   .pill.warn { color: var(--warn); border-color: var(--warn); }
@@ -110,12 +114,13 @@
   <div class="badges">
     <span id="http-badge" class="badge">HTTP: ожидание</span>
     <span id="rx-age" class="badge">получено: —</span>
+    <span id="transport-note" class="badge warn hidden"></span>
   </div>
 </header>
 
 <main>
   <section class="card" id="control-card">
-    <h2>Управление <span id="ctl-health" class="pill">—</span></h2>
+    <h2>Управление <span id="ctl-health" class="pill">—</span><span id="ctl-freshness" class="pill">—</span></h2>
     <dl>
       <div><dt>Фаза</dt><dd id="phase" class="unknown">—</dd></div>
       <div><dt>Защёлка</dt><dd id="latch" class="unknown">—</dd></div>
@@ -127,7 +132,7 @@
   </section>
 
   <section class="card" id="azimuth-card">
-    <h2>Азимут <span id="az-health" class="pill">—</span></h2>
+    <h2>Азимут <span id="az-health" class="pill">—</span><span id="az-freshness" class="pill">—</span></h2>
     <dl>
       <div><dt>Состояние</dt><dd id="az-state" class="unknown">—</dd></div>
       <div><dt>Позиция, полушаги</dt><dd id="az-pos" class="unknown">—</dd></div>
@@ -140,7 +145,7 @@
   </section>
 
   <section class="card" id="altitude-card">
-    <h2>Высота <span id="alt-health" class="pill">—</span></h2>
+    <h2>Высота <span id="alt-health" class="pill">—</span><span id="alt-freshness" class="pill">—</span></h2>
     <dl>
       <div><dt>Состояние</dt><dd id="alt-state" class="unknown">—</dd></div>
       <div><dt>Позиция, полушаги</dt><dd id="alt-pos" class="unknown">—</dd></div>
@@ -153,7 +158,7 @@
   </section>
 
   <section class="card" id="joy-card">
-    <h2>Джойстик <span id="joy-health" class="pill">—</span></h2>
+    <h2>Джойстик <span id="joy-health" class="pill">—</span><span id="joy-freshness" class="pill">—</span></h2>
     <dl>
       <div><dt>Калибровка</dt><dd id="joy-calibrated" class="unknown">—</dd></div>
       <div><dt>Положение пригодно</dt><dd id="joy-output" class="unknown">—</dd></div>
@@ -194,6 +199,7 @@
 
   var POLL_MS = 1000;
   var TIMEOUT_MS = 1500;
+  var STALE_AFTER_MS = 3000;
   var BACKOFF_MAX_MS = 8000;
 
   var inFlight = false;
@@ -201,6 +207,7 @@
   var backoff = POLL_MS;
   var hiddenPause = false;
   var timerId = null;
+  var transportStale = false;
 
   function byId(id) {
     return document.getElementById(id);
@@ -263,32 +270,37 @@
     return value.toFixed(1);
   }
 
-  function setHealth(id, health) {
+  function pillClass(value) {
+    if (value === "ok" || value === "fresh") {
+      return "pill ok";
+    }
+    if (value === "stale") {
+      return "pill warn";
+    }
+    if (value === null || value === undefined ||
+        value === "unknown" || value === "never") {
+      return "pill muted";
+    }
+    return "pill bad";
+  }
+
+  function setPill(id, value) {
     var node = byId(id);
     if (!node) {
       return;
     }
-    node.textContent = health ? String(health) : "—";
-    var cls = "pill";
-    if (health === "ok") {
-      cls += " ok";
-    } else if (health === "stale") {
-      cls += " warn";
-    } else if (health === "unknown") {
-      cls += " muted";
-    } else if (health) {
-      cls += " bad";
-    }
-    node.className = cls;
+    node.textContent = value ? String(value) : "—";
+    node.className = pillClass(value);
   }
 
-  function setCardState(cardId, health) {
+  // health — состояние источника, freshness — только возраст его данных.
+  function setCardState(cardId, health, freshness) {
     var card = byId(cardId);
     if (!card) {
       return;
     }
-    card.classList.toggle("stale", health === "stale");
     card.classList.toggle("invalid", health === "unknown");
+    card.classList.toggle("stale", freshness === "stale");
   }
 
   function setHttp(kind) {
@@ -311,10 +323,34 @@
     }
   }
 
+  function setTransportStale(stale, seconds) {
+    transportStale = stale;
+    var note = byId("transport-note");
+    if (note) {
+      if (stale) {
+        note.textContent = "последние полученные данные устарели" +
+          (typeof seconds === "number" ? ": " + seconds + " с без ответа" : "");
+        note.classList.remove("hidden");
+      } else {
+        note.textContent = "";
+        note.classList.add("hidden");
+      }
+    }
+    ["control-card", "azimuth-card", "altitude-card", "joy-card"]
+      .forEach(function (id) {
+        var card = byId(id);
+        if (card) {
+          card.classList.toggle("transport-stale", stale);
+        }
+      });
+  }
+
   function renderAxis(prefix, cardId, axis) {
     var health = axis ? axis.health : null;
-    setHealth(prefix + "-health", health);
-    setCardState(cardId, health);
+    var freshness = axis ? axis.freshness : null;
+    setPill(prefix + "-health", health);
+    setPill(prefix + "-freshness", freshness);
+    setCardState(cardId, health, freshness);
     if (!axis || axis.valid !== true) {
       ["-state", "-pos", "-rate", "-energized", "-trusted", "-fault", "-age"]
         .forEach(function (suffix) { setUnknown(prefix + suffix); });
@@ -337,8 +373,10 @@
 
   function renderControl(control) {
     var health = control ? control.health : null;
-    setHealth("ctl-health", health);
-    setCardState("control-card", health);
+    var freshness = control ? control.freshness : null;
+    setPill("ctl-health", health);
+    setPill("ctl-freshness", freshness);
+    setCardState("control-card", health, freshness);
     if (!control || control.valid !== true) {
       ["phase", "latch", "permit", "owner", "deny", "ctl-age"]
         .forEach(setUnknown);
@@ -354,8 +392,10 @@
 
   function renderJoystick(joystick) {
     var health = joystick ? joystick.health : null;
-    setHealth("joy-health", health);
-    setCardState("joy-card", health);
+    var freshness = joystick ? joystick.freshness : null;
+    setPill("joy-health", health);
+    setPill("joy-freshness", freshness);
+    setCardState("joy-card", health, freshness);
     if (!joystick || joystick.valid !== true) {
       ["joy-calibrated", "joy-output", "joy-neutral", "joy-fault", "joy-age"]
         .forEach(setUnknown);
@@ -411,15 +451,16 @@
     renderDiag(data ? data.diag : null, axes);
   }
 
+  function secondsSinceOk() {
+    if (!lastOkAt) {
+      return null;
+    }
+    return Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
+  }
+
   function markStale(kind) {
     setHttp(kind);
-    ["control-card", "azimuth-card", "altitude-card", "joy-card"]
-      .forEach(function (id) {
-        var card = byId(id);
-        if (card) {
-          card.classList.add("stale");
-        }
-      });
+    setTransportStale(true, secondsSinceOk());
   }
 
   function schedule(ms) {
@@ -455,6 +496,8 @@
         backoff = POLL_MS;
         setHttp("ok");
         render(data);
+        // Пометка устаревания снимается только после успешного снимка.
+        setTransportStale(false);
         schedule(POLL_MS);
       })
       .catch(function (error) {
@@ -473,8 +516,12 @@
     if (!lastOkAt) {
       return;
     }
-    var seconds = Math.max(0, Math.round((Date.now() - lastOkAt) / 1000));
+    var seconds = secondsSinceOk();
     setText("rx-age", "получено: " + seconds + " с назад");
+    if ((Date.now() - lastOkAt) > STALE_AFTER_MS) {
+      // Транспортное устаревание: значения сохраняются, но помечаются.
+      setTransportStale(true, seconds);
+    }
   }
 
   document.addEventListener("visibilitychange", function () {
@@ -483,6 +530,8 @@
       return;
     }
     hiddenPause = false;
+    // Пересчёт сразу, не полагаясь на таймер, работавший в фоне.
+    tickAges();
     backoff = POLL_MS;
     schedule(0);
   });

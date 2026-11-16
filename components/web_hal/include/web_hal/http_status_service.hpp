@@ -3,12 +3,16 @@
  * @brief Локальный HTTP-сервер состояния и его lifecycle.
  *
  * Контракт:
- *  - единственный владелец httpd_handle_t — этот объект, и только его
- *    задача-супервизор вызывает httpd_start()/httpd_stop();
- *  - сервер запускается только после подтверждённого события AP_START
- *    (RadioState::Running) и останавливается при уходе радио из Running;
- *  - состояние `Stopped` достигается только при подтверждённом завершении:
- *    в ESP-IDF 6.1 код ESP_FAIL от httpd_stop() означает, что сервер жив;
+ *  - единственный владелец httpd_handle_t — этот объект;
+ *  - решения принимает чистая обёртка web::ServerController: она применяет
+ *    те же правила, что и автомат ServerLifecycle, и проверяется на хосте;
+ *  - сервер запускается только при подтверждённом AP_START и
+ *    останавливается при уходе радио из Running;
+ *  - `Stopped` достигается только при подтверждённом останове; при
+ *    неподтверждённом останове владение сохраняется, а объект нельзя
+ *    уничтожать, пока сервер может вызывать обработчики с user_ctx = this;
+ *  - финализация задачи-супервизора идёт через shutdownOnce(), а не отдельным
+ *    вызовом httpd_stop();
  *  - HTTP-слой только читает StateHub и AccessPointStatus. Моторных вызовов,
  *    записи в NVS/flash и изменения режима радио здесь нет.
  */
@@ -24,7 +28,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "state_hal/state_hub.hpp"
-#include "web/server_lifecycle.hpp"
+#include "web/server_controller.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
 namespace web_hal {
@@ -60,19 +64,55 @@ public:
     /// Запускает задачу-супервизор. Ожидания Wi-Fi нет.
     esp_err_t start();
 
-    /// Останавливает задачу; сервер закрывается в её финализации.
+    /**
+     * @brief Останавливает супервизор и сервер.
+     *
+     * Возвращает результат именно этого останова: `ESP_OK` — завершение
+     * подтверждено, `ESP_ERR_TIMEOUT` — супервизор не подтвердил выход
+     * (владение сохранено), `ESP_FAIL` — останов не подтверждён.
+     */
     esp_err_t stop();
 
     HttpStatusCounters counters() const;
 
 private:
+    /// Мост к реальному серверу; доступ к handle_ только через владельца.
+    class ServerPortImpl final : public web::ServerPort {
+    public:
+        explicit ServerPortImpl(HttpStatusService &owner) noexcept
+            : owner_(owner)
+        {
+        }
+
+        web::StartOutcome start() noexcept override
+        {
+            return owner_.portStart();
+        }
+
+        web::StopOutcome stop() noexcept override
+        {
+            return owner_.portStop();
+        }
+
+        bool hasServer() const noexcept override
+        {
+            return owner_.handle_ != nullptr;
+        }
+
+    private:
+        HttpStatusService &owner_;
+    };
+
     static void taskEntry(void *arg);
     void run();
 
+    void superviseOnce();
     bool retryElapsed(TickType_t now) const noexcept;
-    void doStart();
-    void doStop();
-    void publishLifecycle() noexcept;
+    void refreshRetryStamp(TickType_t now) noexcept;
+    void publishState() noexcept;
+
+    web::StartOutcome portStart();
+    web::StopOutcome portStop();
 
     static esp_err_t pageHandler(httpd_req_t *req);
     static esp_err_t stateHandler(httpd_req_t *req);
@@ -83,11 +123,12 @@ private:
     state_hal::StateHub &hub_;
     wifi_hal::WifiApService &access_point_;
 
+    ServerPortImpl port_;
+    web::ServerController controller_;
+
     /// Пишет и читает только задача-супервизор.
-    web::ServerLifecycle lifecycle_{};
     httpd_handle_t handle_ = nullptr;
     TickType_t retry_at_ = 0;
-    bool retry_pending_ = false;
 
     StaticSemaphore_t exit_sem_storage_{};
     SemaphoreHandle_t exit_sem_ = nullptr;
@@ -95,6 +136,8 @@ private:
 
     std::atomic<bool> shutdown_requested_{false};
     std::atomic<bool> task_exited_{false};
+    /// Результат текущего останова, выставляется финализацией.
+    std::atomic<esp_err_t> shutdown_result_{ESP_OK};
 
     std::atomic<web::ServerState> published_lifecycle_{web::ServerState::Stopped};
     std::atomic<bool> handle_present_{false};

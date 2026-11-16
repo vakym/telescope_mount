@@ -25,9 +25,7 @@ ServerAction ServerLifecycle::update(bool ap_running, bool ap_stopping,
 
         case ServerState::Running:
             if (!ap_running || ap_stopping) {
-                state_ = ServerState::Stopping;
-                stop_retry_pending_ = false;
-                ++stops;
+                beginStop();
                 return ServerAction::Stop;
             }
             return ServerAction::None;
@@ -53,6 +51,16 @@ ServerAction ServerLifecycle::update(bool ap_running, bool ap_stopping,
             return ServerAction::None;
     }
     return ServerAction::None;
+}
+
+void ServerLifecycle::beginStop() noexcept
+{
+    if (state_ != ServerState::Running) {
+        return;
+    }
+    state_ = ServerState::Stopping;
+    stop_retry_pending_ = false;
+    ++stops;
 }
 
 void ServerLifecycle::startSucceeded() noexcept

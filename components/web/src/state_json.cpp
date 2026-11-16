@@ -224,14 +224,24 @@ constexpr const char *kControlNullableFields[] = {
 void writeAxis(Writer &writer, const state::AxisObservation &obs,
                state::Micros now_us, state::Micros stale_us) noexcept
 {
+    // health описывает состояние (fault/disabled важнее возраста), а
+    // freshness — только возраст данных. Это разные признаки, и оба нужны.
     const state::AxisHealth health = state::axisHealth(obs, now_us, stale_us);
-    const AgeInfo age = ageInfo(now_us, obs.meta.polled_us, stale_us);
+    const state::Freshness fresh_state =
+        obs.meta.valid
+            ? state::freshness(now_us, obs.meta.polled_us, stale_us)
+            : state::Freshness::Never;
+    const AgeInfo age =
+        obs.meta.valid ? ageInfo(now_us, obs.meta.polled_us, stale_us)
+                       : AgeInfo{};
     bool first = true;
     beginObject(writer);
     key(writer, first, "valid");
     writer.boolean(obs.meta.valid);
     key(writer, first, "health");
     writer.quoted(state::axisHealthName(health));
+    key(writer, first, "freshness");
+    writer.quoted(state::freshnessName(fresh_state));
     key(writer, first, "age_ms");
     writeAge(writer, age);
 
@@ -275,13 +285,21 @@ void writeJoystick(Writer &writer, const state::JoystickObservation &obs,
                    state::Micros now_us, state::Micros stale_us) noexcept
 {
     const state::JoyHealth health = state::joyHealth(obs, now_us, stale_us);
-    const AgeInfo age = ageInfo(now_us, obs.meta.measured_us, stale_us);
+    const state::Freshness fresh_state =
+        obs.meta.valid
+            ? state::freshness(now_us, obs.meta.measured_us, stale_us)
+            : state::Freshness::Never;
+    const AgeInfo age =
+        obs.meta.valid ? ageInfo(now_us, obs.meta.measured_us, stale_us)
+                       : AgeInfo{};
     bool first = true;
     beginObject(writer);
     key(writer, first, "valid");
     writer.boolean(obs.meta.valid);
     key(writer, first, "health");
     writer.quoted(state::joyHealthName(health));
+    key(writer, first, "freshness");
+    writer.quoted(state::freshnessName(fresh_state));
     key(writer, first, "age_ms");
     writeAge(writer, age);
 
@@ -307,7 +325,13 @@ void writeJoystick(Writer &writer, const state::JoystickObservation &obs,
 void writeControl(Writer &writer, const state::ControlObservation &obs,
                   state::Micros now_us, state::Micros stale_us) noexcept
 {
-    const AgeInfo age = ageInfo(now_us, obs.meta.polled_us, stale_us);
+    const AgeInfo age =
+        obs.meta.valid ? ageInfo(now_us, obs.meta.polled_us, stale_us)
+                       : AgeInfo{};
+    const state::Freshness fresh_state =
+        obs.meta.valid
+            ? state::freshness(now_us, obs.meta.polled_us, stale_us)
+            : state::Freshness::Never;
     const char *health = "unknown";
     if (obs.meta.valid && age.known) {
         health = age.fresh ? "ok" : "stale";
@@ -319,6 +343,8 @@ void writeControl(Writer &writer, const state::ControlObservation &obs,
     writer.boolean(obs.meta.valid);
     key(writer, first, "health");
     writer.quoted(health);
+    key(writer, first, "freshness");
+    writer.quoted(state::freshnessName(fresh_state));
     key(writer, first, "age_ms");
     writeAge(writer, age);
 

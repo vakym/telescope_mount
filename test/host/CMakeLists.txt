@@ -80,6 +80,7 @@ target_compile_options(control_host PRIVATE -Wall -Wextra -Werror)
 add_library(web_host STATIC
     "${WEB_DIR}/src/state_json.cpp"
     "${WEB_DIR}/src/server_lifecycle.cpp"
+    "${WEB_DIR}/src/server_controller.cpp"
 )
 target_include_directories(web_host PUBLIC "${WEB_DIR}/include")
 target_link_libraries(web_host PUBLIC state_host)
@@ -126,7 +127,8 @@ endforeach()
 
 foreach(test_name
         test_state_json
-        test_server_lifecycle)
+        test_server_lifecycle
+        test_server_controller)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE web_host)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
