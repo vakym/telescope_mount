@@ -127,6 +127,70 @@
   .cal-message { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
   .cal-list { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
   .cal-list li { margin: 2px 0; }
+  .cal-steps {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    list-style: none;
+    padding: 0;
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .cal-steps li {
+    padding: 3px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+  }
+  .cal-steps li.active { color: var(--text); border-color: var(--text); }
+  .cal-steps li.done { color: var(--ok); border-color: var(--ok); }
+  .cal-instruction {
+    margin: 0 0 10px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--line);
+    background: rgba(255, 255, 255, 0.03);
+    border-radius: 6px;
+    font-size: 13px;
+  }
+  .cal-panel { display: grid; gap: 8px; }
+  .cal-field { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .cal-field label { color: var(--muted); font-size: 13px; }
+  .cal-field select, .cal-field input {
+    background: #1d2830;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 13px;
+  }
+  .cal-field input[type="number"] { width: 90px; }
+  .cal-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cal-actions button, .cal-primary, .cal-stop, .cal-hold {
+    background: #1d2830;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .cal-primary { border-color: var(--ok); color: var(--ok); font-weight: 600; }
+  .cal-stop { border-color: var(--warn); color: var(--warn); font-weight: 600; }
+  .cal-hold { flex: 1; padding: 12px 10px; font-size: 14px; }
+  .cal-hold-row { display: flex; gap: 6px; align-items: stretch; }
+  .cal-hold-row .cal-stop { min-width: 90px; }
+  .cal-hint { margin: 0; color: var(--muted); font-size: 12px; }
+  .cal-ack { font-size: 12px; color: var(--muted); }
+  .cal-result-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .cal-advanced { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  .cal-advanced > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .cal-advanced dl { margin-top: 8px; }
+  .cal-advanced .cal-actions { margin-top: 8px; }
   @media (min-width: 760px) {
     main { grid-template-columns: 1fr 1fr; }
     #control-card, #cal-card, details.card, footer { grid-column: 1 / -1; }
@@ -199,48 +263,96 @@
 
   <section class="card hidden" id="cal-card">
     <h2>Калибровка масштаба <span id="cal-state" class="pill">—</span><span id="cal-ready" class="pill">—</span></h2>
-    <dl>
-      <div><dt>Сессия / ревизия</dt><dd id="cal-session" class="unknown">—</dd></div>
-      <div><dt>Поколение движения</dt><dd id="cal-generation" class="unknown">—</dd></div>
-      <div><dt>Удержание / lease</dt><dd id="cal-hold" class="unknown">—</dd></div>
-      <div><dt>Измерений</dt><dd id="cal-count" class="unknown">—</dd></div>
-      <div><dt>Азимут, °/полушаг</dt><dd id="cal-az" class="unknown">—</dd></div>
-      <div><dt>Высота, °/полушаг</dt><dd id="cal-alt" class="unknown">—</dd></div>
-      <div><dt>Итог k / разброс</dt><dd id="cal-result" class="unknown">—</dd></div>
-    </dl>
-    <div class="cal-controls">
-      <div>
-        <select id="cal-axis"><option value="azimuth">Азимут</option><option value="altitude">Высота</option></select>
-        <select id="cal-direction"><option value="forward">Вперёд</option><option value="backward">Назад</option></select>
-        <input id="cal-revolutions" type="number" min="1" max="20" value="1" title="Оборотов на измерение">
-        <input id="cal-repeats" type="number" min="1" max="8" value="2" title="Повторов">
-        <button id="cal-create" type="button">Создать сессию</button>
+
+    <ol class="cal-steps" id="cal-steps">
+      <li data-step="1">1. Настройка</li>
+      <li data-step="2">2. Начало</li>
+      <li data-step="3">3. Обороты</li>
+      <li data-step="4">4. Результат</li>
+      <li data-step="5">5. Сохранено</li>
+    </ol>
+
+    <p id="cal-instruction" class="cal-instruction">Выберите ось и число оборотов, затем нажмите «Начать калибровку».</p>
+
+    <div class="cal-panel" id="cal-panel-setup">
+      <div class="cal-field">
+        <label for="cal-axis">Ось</label>
+        <select id="cal-axis">
+          <option value="azimuth">Азимут</option>
+          <option value="altitude">Высота</option>
+        </select>
       </div>
-      <div>
-        <button id="cal-move-forward" type="button" data-dir="1">Движение ▲</button>
-        <button id="cal-move-backward" type="button" data-dir="-1">Движение ▼</button>
-        <input id="cal-rate" type="number" min="10" max="400" value="100" title="Полушагов/с">
-        <button id="cal-stop" type="button">Стоп</button>
+      <div class="cal-field">
+        <label for="cal-direction">Направление вращения</label>
+        <select id="cal-direction">
+          <option value="forward">Вперёд</option>
+          <option value="backward">Назад</option>
+        </select>
       </div>
-      <div>
-        <button id="cal-confirm-start" type="button">Подтвердить старт</button>
-        <button id="cal-confirm-end" type="button">Подтвердить конец</button>
-        <button id="cal-resume" type="button">Продолжить</button>
-        <button id="cal-abandon" type="button">Отменить доводку</button>
+      <div class="cal-field">
+        <label for="cal-revolutions">Оборотов за измерение</label>
+        <input id="cal-revolutions" type="number" min="1" max="20" value="1">
       </div>
-      <div>
-        <label><input id="cal-ack" type="checkbox"> принять низкую повторяемость</label>
-        <button id="cal-apply" type="button">Применить</button>
-        <button id="cal-repeat" type="button">Ещё повтор</button>
+      <div class="cal-field">
+        <label for="cal-repeats">Измерений подряд</label>
+        <input id="cal-repeats" type="number" min="1" max="8" value="2">
+      </div>
+      <button id="cal-create" class="cal-primary" type="button">Начать калибровку</button>
+      <p class="cal-hint">Удержание обмоток включается автоматически на время сессии. Убедитесь, что метка на оси видна.</p>
+    </div>
+
+    <div class="cal-panel hidden" id="cal-panel-work">
+      <div class="cal-hold-row">
+        <button id="cal-move-backward" class="cal-hold" type="button" data-dir="-1">◀ Держать назад</button>
+        <button id="cal-stop" class="cal-stop" type="button">Стоп</button>
+        <button id="cal-move-forward" class="cal-hold" type="button" data-dir="1">Держать вперёд ▶</button>
+      </div>
+      <div class="cal-field">
+        <label for="cal-rate">Скорость, полушагов/с</label>
+        <input id="cal-rate" type="number" min="10" max="400" value="100">
+      </div>
+      <div class="cal-actions">
+        <button id="cal-confirm-start" class="cal-primary" type="button">Подтвердить начало</button>
+        <button id="cal-confirm-end" class="cal-primary" type="button">Подтвердить конец</button>
+        <button id="cal-resume" type="button">Продолжить движение</button>
+        <button id="cal-abandon" type="button">Сбросить точки</button>
+      </div>
+      <p class="cal-hint">Отпускание кнопки — штатный останов. «Стоп» фиксирует точку для подтверждения.</p>
+    </div>
+
+    <div class="cal-panel hidden" id="cal-panel-review">
+      <ul id="cal-measurements" class="cal-list"></ul>
+      <div class="cal-result-row">
+        <span>Итог, °/полушаг и разброс</span>
+        <b id="cal-result" class="unknown">—</b>
+      </div>
+      <label class="cal-ack"><input id="cal-ack" type="checkbox"> Принять низкую повторяемость</label>
+      <div class="cal-actions">
+        <button id="cal-apply" class="cal-primary" type="button">Сохранить калибровку</button>
+        <button id="cal-repeat" type="button">Ещё один повтор</button>
+        <button id="cal-close" type="button">Закрыть сессию</button>
+      </div>
+    </div>
+
+    <p id="cal-message" class="cal-message">Сессия не создана.</p>
+
+    <details class="cal-advanced">
+      <summary>Дополнительно</summary>
+      <dl>
+        <div><dt>Текущий коэффициент, азимут</dt><dd id="cal-az" class="unknown">—</dd></div>
+        <div><dt>Текущий коэффициент, высота</dt><dd id="cal-alt" class="unknown">—</dd></div>
+        <div><dt>Сессия / ревизия</dt><dd id="cal-session" class="unknown">—</dd></div>
+        <div><dt>Поколение движения</dt><dd id="cal-generation" class="unknown">—</dd></div>
+        <div><dt>Удержание / lease</dt><dd id="cal-hold" class="unknown">—</dd></div>
+        <div><dt>Измерений</dt><dd id="cal-count" class="unknown">—</dd></div>
+      </dl>
+      <div class="cal-actions">
         <input id="cal-index" type="number" min="0" max="7" value="0" title="Номер измерения">
         <button id="cal-delete" type="button">Удалить измерение</button>
         <button id="cal-cancel" type="button">Отменить сессию</button>
-        <button id="cal-close" type="button">Закрыть</button>
         <button id="cal-reset" type="button">Сброс к номиналу</button>
       </div>
-      <p id="cal-message" class="cal-message">Сессия не создана.</p>
-      <ul id="cal-measurements" class="cal-list"></ul>
-    </div>
+    </details>
   </section>
 
   <details class="card" id="diag-card">
@@ -665,6 +777,99 @@
     }
   }
 
+  function calShow(id, visible) {
+    var node = byId(id);
+    if (node) {
+      node.classList.toggle("hidden", !visible);
+    }
+  }
+
+  function calStepFor(state) {
+    if (state === "inactive" || state === "cancelled" || state === "error") {
+      return 1;
+    }
+    if (state === "preparing" || state === "initial_positioning" ||
+        state === "awaiting_start_stop" || state === "start_ready") {
+      return 2;
+    }
+    if (state === "measuring" || state === "awaiting_end_stop" ||
+        state === "end_ready") {
+      return 3;
+    }
+    if (state === "saved") {
+      return 5;
+    }
+    return 4;
+  }
+
+  function calInstruction(s) {
+    var revs = s.revolutions || 1;
+    var target = s.repeats || 1;
+    var done = s.measurement_count || 0;
+    switch (s.state) {
+      case "inactive":
+        return "Шаг 1. Выберите ось, направление и число оборотов, затем нажмите «Начать калибровку».";
+      case "cancelled":
+        return "Сессия отменена. Можно начать заново.";
+      case "error":
+        return "Сессия завершена ошибкой: " + (s.error || "неизвестно") +
+               (s.invalid_reason && s.invalid_reason !== "ok"
+                    ? " (" + s.invalid_reason + ")" : "") + ".";
+      case "preparing":
+        return "Подготовка: получаем управление и включаем удержание оси…";
+      case "initial_positioning":
+        return "Шаг 2. Совместите метку на оси с риской. Для точного доведения удерживайте кнопку движения, затем нажмите «Стоп».";
+      case "awaiting_start_stop":
+        return "Ожидаем подтверждённый останов, чтобы зафиксировать начало.";
+      case "start_ready":
+        return "Начало зафиксировано. Нажмите «Подтвердить начало», чтобы перейти к обороту.";
+      case "measuring":
+        return "Шаг 3. Измерение " + (done + 1) + " из " + target + ": поверните ось на " +
+               revs + " об. и нажмите «Стоп».";
+      case "awaiting_end_stop":
+        return "Ожидаем подтверждённый останов, чтобы зафиксировать конец.";
+      case "end_ready":
+        return "Конец зафиксирован. Нажмите «Подтвердить конец». Если метка не сошлась — «Продолжить движение».";
+      case "review":
+        return "Шаг 4. Проверьте измерения и итог. Сохраните калибровку.";
+      case "applying":
+      case "saving":
+        return "Сохранение в память…";
+      case "saved":
+        return "Сохранено. Нажмите «Закрыть сессию», чтобы вернуться к выбору оси.";
+      case "save_failed":
+        return "Запись не удалась. Повторите сохранение.";
+      case "save_uncertain":
+        return "Результат записи не подтверждён. Повторите сохранение.";
+      case "cancelling":
+        return "Отмена: останавливаем ось…";
+    }
+    return "";
+  }
+
+  function calGuide(s) {
+    var step = calStepFor(s.state);
+    var steps = byId("cal-steps");
+    if (steps) {
+      var items = steps.getElementsByTagName("li");
+      for (var i = 0; i < items.length; ++i) {
+        var index = i + 1;
+        items[i].classList.toggle("active", index === step);
+        items[i].classList.toggle("done", index < step);
+      }
+    }
+    calShow("cal-panel-setup", step === 1);
+    calShow("cal-panel-work", step === 2 || step === 3);
+    calShow("cal-panel-review", step >= 4);
+    setText("cal-instruction", calInstruction(s));
+    // Показываем только действия, уместные в текущем состоянии.
+    calShow("cal-confirm-start", s.state === "start_ready");
+    calShow("cal-confirm-end", s.state === "end_ready");
+    calShow("cal-resume", s.state === "end_ready");
+    calShow("cal-abandon", s.state === "start_ready" || s.state === "measuring" ||
+                            s.state === "end_ready");
+  }
+
   function calButtons(state) {
     var idle = state === "inactive" || calTerminal(state);
     calEnable("cal-create", idle);
@@ -674,15 +879,16 @@
     calEnable("cal-confirm-start", state === "start_ready");
     calEnable("cal-confirm-end", state === "end_ready");
     calEnable("cal-resume", state === "end_ready");
-    calEnable("cal-abandon", state === "measuring" || state === "end_ready");
+    calEnable("cal-abandon", state === "start_ready" || state === "measuring" ||
+                             state === "end_ready");
     calEnable("cal-apply", state === "review" || state === "save_failed" ||
                           state === "save_uncertain");
     calEnable("cal-repeat", state === "review");
     calEnable("cal-delete", state === "review");
     calEnable("cal-close", calTerminal(state));
     calEnable("cal-cancel", !idle);
-    var movable = state === "initial_positioning" || state === "measuring" ||
-                  state === "end_ready";
+    var movable = state === "initial_positioning" || state === "start_ready" ||
+                  state === "measuring" || state === "end_ready";
     calEnable("cal-move-forward", movable);
     calEnable("cal-move-backward", movable);
   }
@@ -751,6 +957,7 @@
     }
     renderMeasurements(data.measurements);
     calButtons(s.state);
+    calGuide(s);
     if (s.id === 0) {
       setCalToken("");
     }
@@ -925,6 +1132,7 @@
         button.addEventListener("pointercancel", releaseMove);
       });
     calButtons("inactive");
+    calGuide({ state: "inactive", revolutions: 1, repeats: 1, measurement_count: 0 });
     calMessage("Сессия не создана.");
     pollCalibration();
     setInterval(pollCalibration, CAL_POLL_MS);
