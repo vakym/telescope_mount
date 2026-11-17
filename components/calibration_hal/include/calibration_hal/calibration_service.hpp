@@ -92,20 +92,21 @@ public:
     // Команды сессии. session_id и token обязательны: токен выдаётся один раз
     // при создании и не публикуется в общем статусе.
     CommandOutcome createSession(const SessionRequest &request, std::uint32_t &session_id,
-                                 std::uint32_t &token);
-    CommandOutcome closeSession(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome move(std::uint32_t session_id, std::uint32_t token,
+                                 std::uint64_t &token);
+    CommandOutcome closeSession(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome move(std::uint32_t session_id, std::uint64_t token,
                         motion::Direction direction, float rate,
                         std::uint32_t expected_motion_generation);
-    CommandOutcome stop(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome confirmStart(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome confirmEnd(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome resume(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome abandon(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome deleteMeasurement(std::uint32_t session_id, std::uint32_t token,
+    CommandOutcome stop(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome confirmStart(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome confirmEnd(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome resume(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome abandon(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome cancelSession(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome deleteMeasurement(std::uint32_t session_id, std::uint64_t token,
                                      std::size_t index);
-    CommandOutcome addRepeat(std::uint32_t session_id, std::uint32_t token);
-    CommandOutcome apply(std::uint32_t session_id, std::uint32_t token,
+    CommandOutcome addRepeat(std::uint32_t session_id, std::uint64_t token);
+    CommandOutcome apply(std::uint32_t session_id, std::uint64_t token,
                          bool acknowledge_low_repeatability);
     /// Сброс необратим: требует явного подтверждения в теле.
     CommandOutcome resetAxis(motion::AxisId axis, bool confirmed);
@@ -117,8 +118,9 @@ private:
     bool lock(TickType_t wait = portMAX_DELAY) const;
     void unlock() const;
 
-    bool tokenValid(std::uint32_t token) const noexcept;
-    void finishSessionLocked(calibration::Micros now);
+    bool tokenValid(std::uint64_t token) const noexcept;
+    /// true — удержание и владение подтверждённо сняты.
+    bool finishSessionLocked(calibration::Micros now);
     bool liveReferenceValid(const calibration::Snapshot &snapshot) const noexcept;
     void validateMeasurement(calibration::Micros now, const calibration::Snapshot &snapshot);
     void stepPreparing(calibration::Micros now, const calibration::Snapshot &snapshot);
@@ -127,7 +129,9 @@ private:
     void driveMove(calibration::Micros now, const calibration::Snapshot &snapshot);
     void superviseStop(calibration::Micros now, const calibration::Snapshot &snapshot);
     void superviseTimeouts(calibration::Micros now, const calibration::Snapshot &snapshot);
-    void releaseSession(calibration::Micros now);
+    bool releaseSession(calibration::Micros now);
+    bool handleMoveLease(calibration::Micros now);
+    float permittedOutputRate(calibration::Micros now) const noexcept;
     /// 0 — ошибка записи, 1 — результат неизвестен, 2 — проверено.
     int persist(const calibration::CombinedResult &result);
     bool persistNominal(motion::AxisId axis);
@@ -151,9 +155,8 @@ private:
     AxisScaleStatus scales_[2]{};
 
     std::uint32_t session_id_ = 0;
-    std::uint32_t session_token_ = 0;
+    std::uint64_t session_token_ = 0;
     std::uint32_t next_session_id_ = 1;
-    std::uint32_t token_counter_ = 0;
     std::uint64_t next_stop_request_ = 1;
 
     bool ownership_claimed_ = false;

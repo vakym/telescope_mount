@@ -22,6 +22,7 @@ enum class CalibrationCommandKind : std::uint8_t {
     ConfirmEnd,
     Resume,
     Abandon,
+    Cancel,
     DeleteMeasurement,
     AddRepeat,
     Apply,
@@ -38,7 +39,8 @@ enum class CalibrationCommandResult : std::uint8_t {
 
 struct CalibrationCommand {
     std::uint32_t session_id = 0;
-    std::uint32_t token = 0;  ///< токен владельца сессии
+    /// Токен владельца сессии: 64-битное число, не связанное с номером.
+    std::uint64_t token = 0;
     std::uint32_t motion_generation = 0;
     std::uint32_t revolutions = 1;
     std::uint32_t repeats = 2;

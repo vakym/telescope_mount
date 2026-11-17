@@ -43,6 +43,23 @@ void parsesMove()
     CHECK_NEAR(command.rate, 120.5, 1e-3);
 }
 
+void tokenIs64BitAndNotTheSessionNumber()
+{
+    // Токен приходит строкой: 64-битное значение не должно усекаться.
+    const char *body = "{\"session_id\":1,\"token\":\"18446744073709551615\"}";
+    CalibrationCommand command{};
+    CHECK(web::parseCalibrationCommand(CalibrationCommandKind::Stop, body,
+                                       std::strlen(body), command) ==
+          CalibrationCommandResult::Ok);
+    CHECK(command.session_id == 1U);
+    CHECK(command.token == 18446744073709551615ULL);
+    // Ноль не является допустимым токеном.
+    const char *zero = "{\"session_id\":1,\"token\":\"0\"}";
+    CHECK(web::parseCalibrationCommand(CalibrationCommandKind::Stop, zero,
+                                       std::strlen(zero), command) ==
+          CalibrationCommandResult::InvalidValue);
+}
+
 void rejectsMissingField()
 {
     const char *body = "{\"session_id\":5}";
@@ -133,6 +150,7 @@ int main()
 {
     parsesCreateSession();
     parsesMove();
+    tokenIs64BitAndNotTheSessionNumber();
     rejectsMissingField();
     resetRequiresConfirmation();
     rejectsInvalidValues();

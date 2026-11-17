@@ -79,6 +79,17 @@ bool parseU32(const char *text, std::uint32_t &out) noexcept
     return true;
 }
 
+bool parseU64(const char *text, std::uint64_t &out) noexcept
+{
+    char *end = nullptr;
+    const unsigned long long value = std::strtoull(text, &end, 10);
+    if (end == text || *end != '\0' || value == 0ULL) {
+        return false;
+    }
+    out = static_cast<std::uint64_t>(value);
+    return true;
+}
+
 bool parseAxis(const char *text, int &out) noexcept
 {
     if (std::strcmp(text, "azimuth") == 0 || std::strcmp(text, "az") == 0 ||
@@ -177,7 +188,9 @@ CalibrationCommandResult parseCalibrationCommand(CalibrationCommandKind kind,
                 }
                 seen_session = true;
             } else if (std::strcmp(key, "token") == 0) {
-                if (!parseU32(value, out.token) || out.token == 0U) {
+                // Принимается и число, и строка: браузер передаёт строку,
+                // чтобы не потерять точность 64-битного токена.
+                if (!parseU64(value, out.token)) {
                     return CalibrationCommandResult::InvalidValue;
                 }
                 seen_token = true;

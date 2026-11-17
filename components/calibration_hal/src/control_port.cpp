@@ -95,6 +95,11 @@ bool ControlPort::endHold(motion::AxisId axis, std::uint32_t session)
     return control_.endCalibrationHold(axis, session) == ESP_OK;
 }
 
+bool ControlPort::holdActive(motion::AxisId axis, std::uint32_t session) const
+{
+    return control_.calibrationHoldActive(axis, session);
+}
+
 bool ControlPort::submitRates(std::uint32_t session, motion::AxisId axis, float rate,
                               calibration::Micros lease_us)
 {

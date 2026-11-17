@@ -5,6 +5,8 @@
 
 #include "calibration_hal/calibration_service.hpp"
 
+#include "esp_random.h"
+
 #include <cmath>
 #include <cstring>
 
@@ -20,6 +22,7 @@ constexpr const char *kTag = "calibration";
 constexpr std::uint32_t kTaskStackBytes = 5120;
 constexpr UBaseType_t kTaskPriority = 5;
 constexpr calibration::Micros kStopConfirmTimeoutUs = 3'000'000;
+constexpr calibration::Micros kReleaseConfirmUs = 300'000;
 constexpr calibration::Micros kFlashWindowTimeoutUs = 5'000'000;
 constexpr calibration::Micros kReadinessLossMarginUs = 1'500'000;
 constexpr calibration::Micros kClaimRetryUs = 250'000;
@@ -74,19 +77,20 @@ void CalibrationService::unlock() const
     (void)xSemaphoreGive(mutex_);
 }
 
-bool CalibrationService::tokenValid(std::uint32_t token) const noexcept
+bool CalibrationService::tokenValid(std::uint64_t token) const noexcept
 {
     return session_id_ != 0U && token != 0U && token == session_token_;
 }
 
-void CalibrationService::finishSessionLocked(calibration::Micros now)
+bool CalibrationService::finishSessionLocked(calibration::Micros now)
 {
-    if (!released_) {
-        move_active_ = false;
-        stop_pending_ = false;
-        releaseSession(now);
-        released_ = true;
+    if (released_) {
+        return true;
     }
+    move_active_ = false;
+    stop_pending_ = false;
+    released_ = releaseSession(now);
+    return released_;
 }
 
 esp_err_t CalibrationService::start()
@@ -210,7 +214,7 @@ CalibrationStatus CalibrationService::status() const
 
 CommandOutcome CalibrationService::createSession(const SessionRequest &request,
                                                  std::uint32_t &session_id,
-                                                 std::uint32_t &token)
+                                                 std::uint64_t &token)
 {
     session_id = 0;
     token = 0;
@@ -230,9 +234,11 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
         return CommandOutcome::Busy;
     }
     if (session_.terminal()) {
-        // Освобождение старых ресурсов выполняется синхронно, не полагаясь на
-        // то, что фоновая задача успеет сделать цикл между HTTP-командами.
-        finishSessionLocked(port_.nowUs());
+        // Новая сессия не начинается поверх незавершённого освобождения.
+        if (!finishSessionLocked(port_.nowUs())) {
+            unlock();
+            return CommandOutcome::Busy;
+        }
         session_.close();
     }
     if (!session_.start(config, params_)) {
@@ -243,10 +249,11 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
     if (next_session_id_ == 0U) {
         next_session_id_ = 1;
     }
-    session_token_ = ++token_counter_;
-    if (session_token_ == 0U) {
-        session_token_ = ++token_counter_;
-    }
+    // Токен не связан с номером сессии и не выводится из публичных данных.
+    do {
+        session_token_ = (static_cast<std::uint64_t>(esp_random()) << 32U) |
+                         static_cast<std::uint64_t>(esp_random());
+    } while (session_token_ == 0U);
     token = session_token_;
     session_id = session_id_;
     ownership_claimed_ = false;
@@ -267,7 +274,7 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::closeSession(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::closeSession(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -284,7 +291,11 @@ CommandOutcome CalibrationService::closeSession(std::uint32_t session, std::uint
         unlock();
         return CommandOutcome::InvalidState;
     }
-    finishSessionLocked(port_.nowUs());
+    if (!finishSessionLocked(port_.nowUs())) {
+        // Освобождение не подтверждено: сессия остаётся открытой для повтора.
+        unlock();
+        return CommandOutcome::Busy;
+    }
     session_.close();
     session_id_ = 0;
     session_token_ = 0;
@@ -292,7 +303,7 @@ CommandOutcome CalibrationService::closeSession(std::uint32_t session, std::uint
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::move(std::uint32_t session, std::uint32_t token,
+CommandOutcome CalibrationService::move(std::uint32_t session, std::uint64_t token,
                                         motion::Direction direction, float rate,
                                         std::uint32_t expected_generation)
 {
@@ -350,7 +361,7 @@ bool CalibrationService::requestStopInternal(calibration::Micros now)
     return port_.requestStop(stop_request_id_);
 }
 
-CommandOutcome CalibrationService::stop(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::stop(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -379,7 +390,7 @@ CommandOutcome CalibrationService::stop(std::uint32_t session, std::uint32_t tok
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::confirmStart(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::confirmStart(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -410,7 +421,7 @@ CommandOutcome CalibrationService::confirmStart(std::uint32_t session, std::uint
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::confirmEnd(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::confirmEnd(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -436,7 +447,7 @@ CommandOutcome CalibrationService::confirmEnd(std::uint32_t session, std::uint32
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::resume(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::resume(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -458,7 +469,7 @@ CommandOutcome CalibrationService::resume(std::uint32_t session, std::uint32_t t
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::abandon(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::abandon(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -481,8 +492,36 @@ CommandOutcome CalibrationService::abandon(std::uint32_t session, std::uint32_t 
     return CommandOutcome::Ok;
 }
 
+CommandOutcome CalibrationService::cancelSession(std::uint32_t session, std::uint64_t token)
+{
+    if (!lock()) {
+        return CommandOutcome::Busy;
+    }
+    if (session != session_id_ || session_id_ == 0U) {
+        unlock();
+        return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
+    move_active_ = false;
+    if (!session_.cancel()) {
+        // Терминальное состояние: отменять нечего.
+        unlock();
+        return CommandOutcome::InvalidState;
+    }
+    const calibration::Micros now = port_.nowUs();
+    last_activity_us_ = now;
+    if (session_.state() == calibration::SessionState::Cancelling && !stop_pending_) {
+        (void)requestStopInternal(now);
+    }
+    unlock();
+    return CommandOutcome::Ok;
+}
+
 CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session,
-                                                     std::uint32_t token, std::size_t index)
+                                                     std::uint64_t token, std::size_t index)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -504,7 +543,7 @@ CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session,
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::addRepeat(std::uint32_t session, std::uint32_t token)
+CommandOutcome CalibrationService::addRepeat(std::uint32_t session, std::uint64_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -558,7 +597,7 @@ int CalibrationService::persist(const calibration::CombinedResult &result)
     return verified ? 2 : 1;
 }
 
-CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint32_t token,
+CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint64_t token,
                                          bool acknowledge_low_repeatability)
 {
     if (!lock()) {
@@ -649,15 +688,19 @@ void CalibrationService::refreshReadiness(calibration::Micros now)
         return;
     }
     const bool ready = ownership_claimed_ && hold_started_;
-    const calibration::Micros lease =
+    calibration::Micros lease =
         static_cast<calibration::Micros>(CONFIG_CAL_READINESS_LEASE_MS) * 1000ULL;
     port_.setInputReady(ready, session_id_, now + lease);
     // Арбитражный слот живёт по lease уставки: без периодического продления
     // владение истекло бы через секунду даже без движения. Повторяем текущую
-    // уставку (0 при простое), а не нулевую всегда, иначе остановилось бы
-    // движение.
-    const float rate = move_active_ ? calibration::signedRate(move_direction_, move_rate_)
-                                    : 0.0F;
+    // уставку, но её срок не выходит за разрешение браузера.
+    const float rate = permittedOutputRate(now);
+    if (rate != 0.0F) {
+        const calibration::Micros remaining = move_until_us_ - now;
+        if (remaining < lease) {
+            lease = remaining;
+        }
+    }
     (void)port_.setRate(session_id_, session_.config().axis, rate, lease);
     readiness_refresh_us_ = now;
 }
@@ -715,12 +758,45 @@ void CalibrationService::validateMeasurement(calibration::Micros now,
     }
 }
 
+bool CalibrationService::handleMoveLease(calibration::Micros now)
+{
+    if (!move_active_ || now <= move_until_us_) {
+        return false;
+    }
+    // Браузер перестал продлевать разрешение: это не штатный останов.
+    // Текущее измерение аннулируется, ось останавливается.
+    move_active_ = false;
+    const calibration::SessionState state = session_.state();
+    if (state == calibration::SessionState::Measuring) {
+        (void)session_.abandon();
+    }
+    if (state == calibration::SessionState::Measuring ||
+        state == calibration::SessionState::InitialPositioning ||
+        state == calibration::SessionState::EndReady) {
+        if (session_.requestStop()) {
+            (void)requestStopInternal(now);
+        }
+    }
+    return true;
+}
+
+float CalibrationService::permittedOutputRate(calibration::Micros now) const noexcept
+{
+    if (!move_active_ || now >= move_until_us_) {
+        return 0.0F;
+    }
+    return calibration::signedRate(move_direction_, move_rate_);
+}
+
 void CalibrationService::stepActive(calibration::Micros now,
                                     const calibration::Snapshot &snapshot)
 {
     if (session_.state() == calibration::SessionState::InitialPositioning) {
         reference_epoch_ = 0;
     }
+    // Дедлайны и отзыв разрешения обрабатываются ДО любой публикации
+    // уставки: refreshReadiness не должен продлить ненулевое движение.
+    (void)handleMoveLease(now);
     if (ownership_claimed_ && snapshot.owner != state::SourceId::Calibration) {
         // Владение отозвано извне (аварийный останов, потеря сессии):
         // сессия не продолжается, удержание будет восстановлено при очистке.
@@ -781,25 +857,8 @@ void CalibrationService::stepPreparing(calibration::Micros now,
 void CalibrationService::driveMove(calibration::Micros now,
                                    const calibration::Snapshot &snapshot)
 {
-    if (!move_active_) {
-        return;
-    }
-    if (now > move_until_us_) {
-        // Браузер перестал продлевать разрешение: это не штатный останов.
-        // Текущее измерение аннулируется, ось останавливается.
-        move_active_ = false;
-        const calibration::SessionState state = session_.state();
-        if (state == calibration::SessionState::Measuring) {
-            (void)session_.abandon();
-        }
-        if (state == calibration::SessionState::Measuring ||
-            state == calibration::SessionState::InitialPositioning ||
-            state == calibration::SessionState::EndReady) {
-            if (session_.requestStop()) {
-                (void)requestStopInternal(now);
-            }
-        }
-        return;
+    if (!move_active_ || now > move_until_us_) {
+        return;  // дедлайн уже обработан в handleMoveLease()
     }
     const calibration::SessionState state = session_.state();
     if (state != calibration::SessionState::InitialPositioning &&
@@ -820,14 +879,18 @@ void CalibrationService::driveMove(calibration::Micros now,
     }
     // Знак задаётся направлением, модуль — клиентом. Срок уставки не
     // продлевается за дедлайн разрешения браузера.
+    const float rate = permittedOutputRate(now);
+    if (rate == 0.0F) {
+        move_active_ = false;
+        return;
+    }
     calibration::Micros lease_us =
         static_cast<calibration::Micros>(CONFIG_CAL_MOVE_LEASE_MS) * 1000ULL;
-    const calibration::Micros remaining = move_until_us_ > now ? move_until_us_ - now : 0;
+    const calibration::Micros remaining = move_until_us_ - now;
     if (remaining < lease_us) {
         lease_us = remaining;
     }
-    (void)port_.setRate(session_id_, session_.config().axis,
-                        calibration::signedRate(move_direction_, move_rate_), lease_us);
+    (void)port_.setRate(session_id_, session_.config().axis, rate, lease_us);
     if (state == calibration::SessionState::Measuring &&
         measure_started_us_ != 0 &&
         now - measure_started_us_ >
@@ -847,7 +910,10 @@ void CalibrationService::superviseStop(calibration::Micros now,
         return;
     }
     const calibration::StopAttestation attestation = port_.lastStopAttestation();
-    if (attestation.confirmed && attestation.confirmed_us >= stop_requested_us_) {
+    // Подтверждается конкретный запрос, а не подходящий по времени снимок.
+    if (attestation.valid && attestation.confirmed &&
+        attestation.request_id == stop_request_id_ &&
+        attestation.confirmed_us >= stop_requested_us_) {
         stop_pending_ = false;
         last_activity_us_ = now;
         if (session_.state() == calibration::SessionState::Cancelling) {
@@ -919,19 +985,34 @@ void CalibrationService::failSession(calibration::SessionError error)
     session_.fail(error);
 }
 
-void CalibrationService::releaseSession(calibration::Micros now)
+bool CalibrationService::releaseSession(calibration::Micros now)
 {
-    (void)now;
-    if (hold_started_) {
-        (void)port_.endHold(session_.config().axis, session_id_);
-        hold_started_ = false;
-    }
     port_.setInputReady(false, session_id_, 0);
     readiness_refresh_us_ = 0;
+    if (hold_started_) {
+        (void)port_.endHold(session_.config().axis, session_id_);
+    }
     if (ownership_claimed_) {
         port_.release(session_id_);
-        ownership_claimed_ = false;
     }
+    // Ждём подтверждения управляющего слоя, а не только отправки заявок.
+    const calibration::Micros deadline = now + kReleaseConfirmUs;
+    for (;;) {
+        const bool hold_clear =
+            !hold_started_ || !port_.holdActive(session_.config().axis, session_id_);
+        const bool owner_clear = !ownership_claimed_ ||
+                                 port_.snapshot().owner != state::SourceId::Calibration;
+        if (hold_clear && owner_clear) {
+            hold_started_ = false;
+            ownership_claimed_ = false;
+            return true;
+        }
+        if (port_.nowUs() >= deadline) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+    return false;
 }
 
 void CalibrationService::step()
@@ -971,8 +1052,7 @@ void CalibrationService::step()
             // Удержание и владение снимаются: применение не требует движения.
             if (!released_) {
                 move_active_ = false;
-                releaseSession(now);
-                released_ = true;
+                released_ = releaseSession(now);
             }
             break;
         case calibration::SessionState::Cancelling:

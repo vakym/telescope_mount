@@ -107,6 +107,7 @@ constexpr PostRoute kCalibrationPosts[] = {
     {"/api/calibration/confirm-end", web::CalibrationCommandKind::ConfirmEnd},
     {"/api/calibration/resume", web::CalibrationCommandKind::Resume},
     {"/api/calibration/abandon", web::CalibrationCommandKind::Abandon},
+    {"/api/calibration/cancel", web::CalibrationCommandKind::Cancel},
     {"/api/calibration/measurements/delete", web::CalibrationCommandKind::DeleteMeasurement},
     {"/api/calibration/repeat", web::CalibrationCommandKind::AddRepeat},
     {"/api/calibration/apply", web::CalibrationCommandKind::Apply},
@@ -706,7 +707,7 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
 
     calibration_hal::CommandOutcome outcome = calibration_hal::CommandOutcome::InvalidState;
     std::uint32_t created_session = 0;
-    std::uint32_t created_token = 0;
+    std::uint64_t created_token = 0;
     switch (kind) {
         case web::CalibrationCommandKind::CreateSession: {
             calibration_hal::SessionRequest request{};
@@ -742,6 +743,9 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
         case web::CalibrationCommandKind::Abandon:
             outcome = self->calibration_.abandon(command.session_id, command.token);
             break;
+        case web::CalibrationCommandKind::Cancel:
+            outcome = self->calibration_.cancelSession(command.session_id, command.token);
+            break;
         case web::CalibrationCommandKind::DeleteMeasurement:
             outcome = self->calibration_.deleteMeasurement(command.session_id, command.token,
                                                            command.index);
@@ -766,11 +770,13 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
     if (outcome == calibration_hal::CommandOutcome::Ok) {
         if (kind == web::CalibrationCommandKind::CreateSession) {
             // Токен выдаётся только создателю и не публикуется в статусе.
-            char created[96];
+            char created[128];
+            // Токен отдаётся строкой: 64-битное число не должно терять
+            // точность в JSON-парсере браузера.
             std::snprintf(created, sizeof(created),
-                          "{\"session_id\":%u,\"token\":%u}",
+                          "{\"session_id\":%u,\"token\":\"%llu\"}",
                           static_cast<unsigned>(created_session),
-                          static_cast<unsigned>(created_token));
+                          static_cast<unsigned long long>(created_token));
             httpd_resp_set_status(req, "200 OK");
             httpd_resp_set_type(req, kJsonContentType);
             httpd_resp_set_hdr(req, kCacheControl, kNoStore);

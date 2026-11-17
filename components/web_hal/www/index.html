@@ -29,6 +29,17 @@
   h1 { margin: 0 0 8px; font-size: 18px; font-weight: 600; }
   h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; color: var(--text); }
   .badges { display: flex; flex-wrap: wrap; gap: 8px; }
+  .tabs { display: flex; gap: 6px; margin-top: 10px; }
+  .tab {
+    padding: 5px 12px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+    font-size: 13px;
+    cursor: pointer;
+  }
+  .tab.active { color: var(--text); border-color: var(--text); }
   .badge {
     padding: 4px 9px;
     border-radius: 999px;
@@ -130,6 +141,10 @@
     <span id="rx-age" class="badge">получено: —</span>
     <span id="transport-note" class="badge warn hidden"></span>
   </div>
+  <nav class="tabs">
+    <button id="tab-state" class="tab active" type="button">Состояние</button>
+    <button id="tab-cal" class="tab" type="button">Калибровка</button>
+  </nav>
 </header>
 
 <main>
@@ -182,7 +197,7 @@
     </dl>
   </section>
 
-  <section class="card" id="cal-card">
+  <section class="card hidden" id="cal-card">
     <h2>Калибровка масштаба <span id="cal-state" class="pill">—</span><span id="cal-ready" class="pill">—</span></h2>
     <dl>
       <div><dt>Сессия / ревизия</dt><dd id="cal-session" class="unknown">—</dd></div>
@@ -214,10 +229,12 @@
         <button id="cal-abandon" type="button">Отменить доводку</button>
       </div>
       <div>
+        <label><input id="cal-ack" type="checkbox"> принять низкую повторяемость</label>
         <button id="cal-apply" type="button">Применить</button>
         <button id="cal-repeat" type="button">Ещё повтор</button>
         <input id="cal-index" type="number" min="0" max="7" value="0" title="Номер измерения">
         <button id="cal-delete" type="button">Удалить измерение</button>
+        <button id="cal-cancel" type="button">Отменить сессию</button>
         <button id="cal-close" type="button">Закрыть</button>
         <button id="cal-reset" type="button">Сброс к номиналу</button>
       </div>
@@ -585,6 +602,8 @@
   document.addEventListener("visibilitychange", function () {
     if (document.hidden) {
       hiddenPause = true;
+      // Удержание кнопки в фоне не должно продолжать выдавать разрешения.
+      releaseMove();
       return;
     }
     hiddenPause = false;
@@ -600,24 +619,30 @@
   var calLast = null;
   var calMoveTimer = null;
   var calMoving = false;
+  var calTokenMemory = "";
 
   function calToken() {
     try {
-      return sessionStorage.getItem(CAL_TOKEN_KEY) || "";
+      var stored = sessionStorage.getItem(CAL_TOKEN_KEY);
+      if (stored) {
+        return stored;
+      }
     } catch (error) {
-      return "";
+      // Приватный режим: используем копию в памяти.
     }
+    return calTokenMemory;
   }
 
   function setCalToken(token) {
+    calTokenMemory = token ? String(token) : "";
     try {
-      if (token) {
-        sessionStorage.setItem(CAL_TOKEN_KEY, String(token));
+      if (calTokenMemory) {
+        sessionStorage.setItem(CAL_TOKEN_KEY, calTokenMemory);
       } else {
         sessionStorage.removeItem(CAL_TOKEN_KEY);
       }
     } catch (error) {
-      // Приватный режим без storage: токен живёт только до перезагрузки.
+      // Приватный режим без storage: токен живёт в calTokenMemory.
     }
   }
 
@@ -655,6 +680,7 @@
     calEnable("cal-repeat", state === "review");
     calEnable("cal-delete", state === "review");
     calEnable("cal-close", calTerminal(state));
+    calEnable("cal-cancel", !idle);
     var movable = state === "initial_positioning" || state === "measuring" ||
                   state === "end_ready";
     calEnable("cal-move-forward", movable);
@@ -734,7 +760,8 @@
     var payload = body || {};
     var token = calToken();
     if (token && !(options && options.keepToken === false)) {
-      payload.token = parseInt(token, 10) || 0;
+      // Строкой: 64-битный токен не должен терять точность в Number.
+      payload.token = token;
     }
     return fetch(path, {
       method: "POST",
@@ -809,6 +836,15 @@
     }
   }
 
+  // Отпускание кнопки/потеря фокуса — штатный останов для фиксации точки.
+  function releaseMove() {
+    stopMoveRepeat();
+    if (calMoving) {
+      calMoving = false;
+      calPost("/api/calibration/stop", { session_id: calSessionId() });
+    }
+  }
+
   function bindCalibration() {
     var create = byId("cal-create");
     if (!create) {
@@ -841,7 +877,16 @@
       calPost("/api/calibration/abandon", { session_id: calSessionId() });
     });
     byId("cal-apply").addEventListener("click", function () {
-      calPost("/api/calibration/apply", { session_id: calSessionId() });
+      var ack = byId("cal-ack");
+      calPost("/api/calibration/apply", {
+        session_id: calSessionId(),
+        acknowledge_low_repeatability: ack ? ack.checked : false
+      });
+    });
+    byId("cal-cancel").addEventListener("click", function () {
+      stopMoveRepeat();
+      calMoving = false;
+      calPost("/api/calibration/cancel", { session_id: calSessionId() });
     });
     byId("cal-repeat").addEventListener("click", function () {
       calPost("/api/calibration/repeat", { session_id: calSessionId() });
@@ -864,14 +909,6 @@
         confirm: true
       });
     });
-    // Отпускание кнопки — штатный останов для фиксации опорной точки.
-    var releaseMove = function () {
-      stopMoveRepeat();
-      if (calMoving) {
-        calMoving = false;
-        calPost("/api/calibration/stop", { session_id: calSessionId() });
-      }
-    };
     [["cal-move-forward", "forward"], ["cal-move-backward", "backward"]]
       .forEach(function (item) {
         var button = byId(item[0]);
@@ -892,6 +929,27 @@
     pollCalibration();
     setInterval(pollCalibration, CAL_POLL_MS);
   }
+
+  // --- Переключение вкладок ---
+  var stateSections = ["control-card", "azimuth-card", "altitude-card", "joy-card",
+                       "diag-card"];
+  function selectTab(calibration) {
+    byId("cal-card").classList.toggle("hidden", !calibration);
+    stateSections.forEach(function (id) {
+      var node = byId(id);
+      if (node) {
+        node.classList.toggle("hidden", calibration);
+      }
+    });
+    byId("tab-state").classList.toggle("active", !calibration);
+    byId("tab-cal").classList.toggle("active", calibration);
+  }
+
+  byId("tab-state").addEventListener("click", function () { selectTab(false); });
+  byId("tab-cal").addEventListener("click", function () { selectTab(true); });
+  // Уход страницы: повтор движения и разрешения прекращаются сразу.
+  window.addEventListener("pagehide", releaseMove);
+  window.addEventListener("blur", releaseMove);
 
   setHttp("wait");
   bindCalibration();
