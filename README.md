@@ -44,6 +44,20 @@
 host-тесты выполнены, стендовые проверки этапа не выполнялись. План и
 журнал — [`plans/web-status-page-plan.md`](plans/web-status-page-plan.md).
 
+Этап 7 — постоянная калибровка масштаба механики двух осей: компоненты
+`calibration` (чистая математика коэффициента, автомат сессии, формат записи,
+CRC и слоты) и `calibration_hal` (адаптер `ControlService`, NVS-хранилище,
+задача сервиса). В `state`/`control` добавлен источник `Calibration` с
+приоритетом выше джойстика, временное удержание опорной точки принадлежит
+`ControlService`, `motion_generation` отзывается на каждом событии потери
+разрешения, окно записи NVS запрещает движение. Веб-слой получил
+`GET /api/calibration` и POST-команды сессии, а на странице появилась вкладка
+калибровки. Формула: `k = 360° · ΣM_i / ΣΔn_i`, номинал задаётся отдельно для
+каждой оси. `idf.py build` и стенд **не выполнялись**: в текущем окружении
+ESP-IDF нет. Host-тесты: 32/32 (включая математику, сессию, запись, JSON и
+разбор команд). Документ и журнал —
+[`docs/plans/0007-axis-scale-calibration.md`](docs/plans/0007-axis-scale-calibration.md).
+
 ## Аппаратная часть
 
 | Компонент | Роль |
@@ -190,6 +204,8 @@ telescope_mount/
 │   ├── state_hal/          публикация снимков под мьютексом
 │   ├── control/            чистая логика: mapping, арбитраж, автомат, останов
 │   ├── control_hal/        управляющая задача, адаптер MotorService, вход
+│   ├── calibration/        чистая логика: коэффициент, сессия, запись, CRC
+│   ├── calibration_hal/    адаптер ControlService, NVS, задача сервиса
 │   ├── web/                контракт JSON, сериализация, автомат сервера
 │   └── web_hal/            esp_http_server, страница в образе, супервизор
 └── test/
@@ -202,8 +218,9 @@ telescope_mount/
 ## Тесты логики
 
 Логика движения, обработки джойстика и кнопки, логика точки доступа
-(`components/wifi`) и веб-контракт (`components/web`) не зависят от ESP-IDF и
-проверяются обычным CMake на хосте:
+(`components/wifi`), математика и автомат калибровки (`components/calibration`)
+и веб-контракт (`components/web`) не зависят от ESP-IDF и проверяются обычным
+CMake на хосте:
 
 ```bash
 cmake -S test/host -B build-host -DCMAKE_BUILD_TYPE=Debug
@@ -244,6 +261,9 @@ OTA и тяжёлое логирование: они срывают распис
   джойстика с протоколом останова
 - [`plans/web-status-page-plan.md`](plans/web-status-page-plan.md) — веб-этап 1:
   локальный HTTP-сервер состояния, контракт JSON и lifecycle сервера
+- [`docs/plans/0007-axis-scale-calibration.md`](docs/plans/0007-axis-scale-calibration.md) —
+  постоянная калибровка масштаба механики обеих осей: формула, автомат сессии,
+  политика удержания, NVS-запись, HTTP-контракт и план внедрения
 - [`docs/hardware/overview.md`](docs/hardware/overview.md) — состав железа, питание,
   схема соединений, характеристики приводов и ограничения
 - [`docs/hardware/pinmap.md`](docs/hardware/pinmap.md) — подтверждённая карта GPIO

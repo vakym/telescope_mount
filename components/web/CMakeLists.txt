@@ -14,6 +14,8 @@ idf_component_register(
         "src/server_controller.cpp"
         "src/shutdown_protocol.cpp"
         "src/retry_gate.cpp"
+        "src/calibration_json.cpp"
+        "src/calibration_command.cpp"
     INCLUDE_DIRS "include"
-    REQUIRES state motion input
+    REQUIRES state motion input calibration
 )

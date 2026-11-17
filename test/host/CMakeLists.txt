@@ -22,6 +22,7 @@ set(INPUT_DIR "${REPO_ROOT}/components/input")
 set(WIFI_DIR "${REPO_ROOT}/components/wifi")
 set(STATE_DIR "${REPO_ROOT}/components/state")
 set(CONTROL_DIR "${REPO_ROOT}/components/control")
+set(CALIBRATION_DIR "${REPO_ROOT}/components/calibration")
 set(WEB_DIR "${REPO_ROOT}/components/web")
 
 add_library(motion_host STATIC
@@ -75,6 +76,16 @@ target_include_directories(control_host PUBLIC "${CONTROL_DIR}/include")
 target_link_libraries(control_host PUBLIC state_host motion_host input_host)
 target_compile_options(control_host PRIVATE -Wall -Wextra -Werror)
 
+add_library(calibration_host STATIC
+    "${CALIBRATION_DIR}/src/types.cpp"
+    "${CALIBRATION_DIR}/src/math.cpp"
+    "${CALIBRATION_DIR}/src/session.cpp"
+    "${CALIBRATION_DIR}/src/record.cpp"
+)
+target_include_directories(calibration_host PUBLIC "${CALIBRATION_DIR}/include")
+target_link_libraries(calibration_host PUBLIC state_host motion_host)
+target_compile_options(calibration_host PRIVATE -Wall -Wextra -Werror)
+
 # web — контракт и автомат веб-слоя: чистый код, тестируется на хосте.
 # Сам HTTP-сервер живёт в web_hal и здесь не собирается.
 add_library(web_host STATIC
@@ -83,9 +94,11 @@ add_library(web_host STATIC
     "${WEB_DIR}/src/server_controller.cpp"
     "${WEB_DIR}/src/shutdown_protocol.cpp"
     "${WEB_DIR}/src/retry_gate.cpp"
+    "${WEB_DIR}/src/calibration_json.cpp"
+    "${WEB_DIR}/src/calibration_command.cpp"
 )
 target_include_directories(web_host PUBLIC "${WEB_DIR}/include")
-target_link_libraries(web_host PUBLIC state_host)
+target_link_libraries(web_host PUBLIC state_host calibration_host)
 target_compile_options(web_host PRIVATE -Wall -Wextra -Werror)
 
 if(ENABLE_SANITIZERS)
@@ -128,11 +141,23 @@ foreach(test_name
 endforeach()
 
 foreach(test_name
+        test_calibration_math
+        test_calibration_session
+        test_calibration_record)
+    add_executable(${test_name} "${test_name}.cpp")
+    target_link_libraries(${test_name} PRIVATE calibration_host)
+    target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ${test_name} COMMAND ${test_name})
+endforeach()
+
+foreach(test_name
         test_state_json
         test_server_lifecycle
         test_server_controller
         test_shutdown_protocol
-        test_retry_gate)
+        test_retry_gate
+        test_calibration_json
+        test_calibration_command)
     add_executable(${test_name} "${test_name}.cpp")
     target_link_libraries(${test_name} PRIVATE web_host)
     target_compile_options(${test_name} PRIVATE -Wall -Wextra -Werror)

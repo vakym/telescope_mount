@@ -51,6 +51,14 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
 {
     ArmingDecision out{};
 
+    // 0. Выбор источника: ветвление, а не объединение. Пока владеет
+    //    калибровка, её пригодность заменяет проверки нейтрали и входа.
+    const bool calibration_selected = in.selected_source == state::SourceId::Calibration;
+    const bool input_usable = calibration_selected ? in.calibration_input_ready
+                                                   : in.input_usable;
+    const bool neutral_confirmed = calibration_selected ? in.calibration_input_ready
+                                                        : in.neutral_confirmed;
+
     // 1. Защёлка выставляется по аварийным входам и не снимается сама.
     if (latch_ == state::LatchCode::None) {
         if (in.motor_fault) {
@@ -85,7 +93,7 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
             beginStopping(StopReason::Disarm);
             out.request_stop = true;
             out.revoke_ownership = true;
-        } else if (phase_ == state::ControlPhase::Active && !in.input_usable) {
+        } else if (phase_ == state::ControlPhase::Active && !input_usable) {
             beginStopping(StopReason::InputLoss);
             out.request_stop = true;
             out.revoke_ownership = true;
@@ -103,7 +111,7 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
         case state::ControlPhase::WaitingForNeutral:
             if (!in.permit || blocked) {
                 phase_ = state::ControlPhase::Disarmed;
-            } else if (in.neutral_confirmed) {
+            } else if (neutral_confirmed) {
                 phase_ = state::ControlPhase::Enabling;
                 out.send_enable = true;
             }
@@ -157,7 +165,7 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
     out.phase = phase_;
     out.latch = latch_;
     out.stop_reason = reason_;
-    out.allow_nonzero = in.permit && !blocked &&
+    out.allow_nonzero = in.permit && !blocked && input_usable &&
                         phase_ == state::ControlPhase::Active;
     return out;
 }

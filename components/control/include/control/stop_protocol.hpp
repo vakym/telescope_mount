@@ -51,6 +51,8 @@ public:
         StopMode mode = StopMode::Smooth;
         state::Micros now_us = 0;
         std::uint32_t baseline_epoch[2] = {0, 0};
+        /// Идентификатор запроса (калибровка). 0 — обычный останов.
+        std::uint64_t request_id = 0;
     };
 
     struct Action {
@@ -86,6 +88,13 @@ public:
     StopReason reason() const noexcept { return reason_; }
     StopMode mode() const noexcept { return mode_; }
     state::Micros requestedUs() const noexcept { return requested_us_; }
+    state::Micros confirmedUs() const noexcept { return confirmed_us_; }
+    std::uint64_t requestId() const noexcept { return request_id_; }
+    /// Тикет последней доставленной команды останова по оси.
+    CommandTicket ticket(std::size_t axis) const noexcept
+    {
+        return axis < 2 ? ticket_[axis] : CommandTicket{};
+    }
 
     static bool axisAtRest(const motion::AxisStatus &status) noexcept;
     static bool axisCannotMove(const motion::AxisStatus &status) noexcept;
@@ -100,6 +109,8 @@ private:
     StopReason reason_ = StopReason::InputLoss;
     StopMode mode_ = StopMode::Smooth;
     state::Micros requested_us_ = 0;
+    state::Micros confirmed_us_ = 0;
+    std::uint64_t request_id_ = 0;
     bool sent_[2] = {false, false};
     CommandTicket ticket_[2]{};
     std::uint32_t baseline_epoch_[2] = {0, 0};

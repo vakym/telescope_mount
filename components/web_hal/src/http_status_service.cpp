@@ -21,9 +21,14 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstring>
 
+#include "calibration_hal/calibration_service.hpp"
 #include "esp_log.h"
 #include "sdkconfig.h"
+#include "web/calibration_command.hpp"
+#include "web/calibration_json.hpp"
 #include "web/state_json.hpp"
 
 // Символы встроенного ресурса: файл копируется в образ через EMBED_FILES.
@@ -38,6 +43,39 @@ extern const unsigned char _binary_index_html_end[];
 
 namespace web_hal {
 namespace {
+
+/// Тело команды калибровки ограничено сверху: больше — не наш клиент.
+constexpr std::size_t kMaxCommandBodyBytes = 256;
+constexpr const char *kBadRequestBody = "{\"error\":\"invalid_request\"}";
+constexpr const char *kTooLargeBody = "{\"error\":\"payload_too_large\"}";
+
+web::CalibrationView toView(const calibration_hal::CalibrationStatus &status)
+{
+    web::CalibrationView view{};
+    view.state = status.state;
+    view.error = status.error;
+    view.invalid_reason = status.invalid_reason;
+    view.session_id = status.session_id;
+    view.revision = status.revision;
+    view.motion_generation = status.motion_generation;
+    view.axis = status.axis;
+    view.direction = status.direction;
+    view.revolutions = status.revolutions;
+    view.repeats = status.repeats;
+    view.measurement_count = status.measurement_count;
+    view.result = status.result;
+    view.mark_recheck_required = status.mark_recheck_required;
+    view.hold_active = status.hold_active;
+    view.input_ready = status.input_ready;
+    view.flash_window_active = status.flash_window_active;
+    view.lease_remaining_ms = status.lease_remaining_ms;
+    for (std::size_t i = 0; i < 2; ++i) {
+        view.scale[i] = status.axes[i].scale;
+        view.nominal_half_steps_per_revolution[i] =
+            status.axes[i].nominal_half_steps_per_revolution;
+    }
+    return view;
+}
 
 constexpr const char *kTag = "web";
 
@@ -54,12 +92,50 @@ constexpr const char *kOverflowBody = "{\"error\":\"serialize_overflow\"}";
 static_assert(CONFIG_WEB_MAX_OPEN_SOCKETS + 3 <= CONFIG_LWIP_MAX_SOCKETS,
               "WEB_MAX_OPEN_SOCKETS is too large for CONFIG_LWIP_MAX_SOCKETS");
 
+/// Таблица POST-маршрутов калибровки: URI определяет тип команды.
+struct PostRoute {
+    const char *uri = nullptr;
+    web::CalibrationCommandKind kind = web::CalibrationCommandKind::Stop;
+};
+
+constexpr PostRoute kCalibrationPosts[] = {
+    {"/api/calibration/session", web::CalibrationCommandKind::CreateSession},
+    {"/api/calibration/move", web::CalibrationCommandKind::Move},
+    {"/api/calibration/stop", web::CalibrationCommandKind::Stop},
+    {"/api/calibration/confirm-start", web::CalibrationCommandKind::ConfirmStart},
+    {"/api/calibration/confirm-end", web::CalibrationCommandKind::ConfirmEnd},
+    {"/api/calibration/apply", web::CalibrationCommandKind::Apply},
+    {"/api/calibration/close", web::CalibrationCommandKind::Close},
+    {"/api/calibration/reset", web::CalibrationCommandKind::Reset},
+};
+
+const char *outcomeText(calibration_hal::CommandOutcome outcome)
+{
+    switch (outcome) {
+        case calibration_hal::CommandOutcome::Ok:
+            return "ok";
+        case calibration_hal::CommandOutcome::NotReady:
+            return "not_ready";
+        case calibration_hal::CommandOutcome::InvalidState:
+            return "invalid_state";
+        case calibration_hal::CommandOutcome::InvalidArgument:
+            return "invalid_argument";
+        case calibration_hal::CommandOutcome::Busy:
+            return "busy";
+        case calibration_hal::CommandOutcome::StaleSession:
+            return "stale_session";
+    }
+    return "invalid_state";
+}
+
 }  // namespace
 
 HttpStatusService::HttpStatusService(state_hal::StateHub &hub,
-                                     wifi_hal::WifiApService &access_point)
+                                     wifi_hal::WifiApService &access_point,
+                                     calibration_hal::CalibrationService &calibration)
     : hub_(hub),
       access_point_(access_point),
+      calibration_(calibration),
       port_(*this),
       controller_(port_),
       exit_sem_storage_{},
@@ -190,6 +266,10 @@ HttpStatusCounters HttpStatusService::counters() const
     snapshot.requests_total = requests_total_.load(std::memory_order_relaxed);
     snapshot.page_requests = page_requests_.load(std::memory_order_relaxed);
     snapshot.state_requests = state_requests_.load(std::memory_order_relaxed);
+    snapshot.calibration_requests =
+        calibration_requests_.load(std::memory_order_relaxed);
+    snapshot.calibration_commands =
+        calibration_commands_.load(std::memory_order_relaxed);
     snapshot.request_failures =
         request_failures_.load(std::memory_order_relaxed);
     snapshot.serialize_overflows =
@@ -315,7 +395,7 @@ web::StartOutcome HttpStatusService::portStart()
     config.core_id = CONFIG_WEB_TASK_CORE;
     config.max_open_sockets =
         static_cast<std::uint16_t>(CONFIG_WEB_MAX_OPEN_SOCKETS);
-    config.max_uri_handlers = 2;
+    config.max_uri_handlers = 12;
     config.max_resp_headers = 4;
     config.backlog_conn = static_cast<std::uint16_t>(CONFIG_WEB_BACKLOG);
     config.recv_wait_timeout =
@@ -354,6 +434,27 @@ web::StartOutcome HttpStatusService::portStart()
         state_uri.handler = &HttpStatusService::stateHandler;
         state_uri.user_ctx = this;
         err = httpd_register_uri_handler(handle, &state_uri);
+    }
+    if (err == ESP_OK) {
+        httpd_uri_t calibration_uri = {};
+        calibration_uri.uri = "/api/calibration";
+        calibration_uri.method = HTTP_GET;
+        calibration_uri.handler = &HttpStatusService::calibrationStatusHandler;
+        calibration_uri.user_ctx = this;
+        err = httpd_register_uri_handler(handle, &calibration_uri);
+    }
+    if (err == ESP_OK) {
+        for (const PostRoute &route : kCalibrationPosts) {
+            httpd_uri_t post_uri = {};
+            post_uri.uri = route.uri;
+            post_uri.method = HTTP_POST;
+            post_uri.handler = &HttpStatusService::calibrationCommandHandler;
+            post_uri.user_ctx = this;
+            err = httpd_register_uri_handler(handle, &post_uri);
+            if (err != ESP_OK) {
+                break;
+            }
+        }
     }
     if (err == ESP_OK) {
         err = httpd_register_err_handler(handle, HTTPD_404_NOT_FOUND,
@@ -476,6 +577,158 @@ esp_err_t HttpStatusService::stateHandler(httpd_req_t *req)
         self->request_failures_.fetch_add(1, std::memory_order_relaxed);
     }
     return err;
+}
+
+esp_err_t HttpStatusService::sendCalibrationStatus(httpd_req_t *req)
+{
+    const calibration_hal::CalibrationStatus status = calibration_.status();
+    char buffer[web::kMaxCalibrationJsonBytes];
+    std::size_t written = 0;
+    if (web::calibrationStatusJson(toView(status), buffer, sizeof(buffer), &written) !=
+        web::CalibrationJsonResult::Ok) {
+        serialize_overflows_.fetch_add(1, std::memory_order_relaxed);
+        request_failures_.fetch_add(1, std::memory_order_relaxed);
+        httpd_resp_set_status(req, "500 Internal Server Error");
+        httpd_resp_set_type(req, kJsonContentType);
+        httpd_resp_set_hdr(req, kCacheControl, kNoStore);
+        return httpd_resp_send(req, kOverflowBody, HTTPD_RESP_USE_STRLEN);
+    }
+    httpd_resp_set_status(req, "200 OK");
+    httpd_resp_set_type(req, kJsonContentType);
+    httpd_resp_set_hdr(req, kCacheControl, kNoStore);
+    const esp_err_t err = httpd_resp_send(req, buffer, static_cast<ssize_t>(written));
+    if (err != ESP_OK) {
+        request_failures_.fetch_add(1, std::memory_order_relaxed);
+    }
+    return err;
+}
+
+esp_err_t HttpStatusService::calibrationStatusHandler(httpd_req_t *req)
+{
+    auto *self = static_cast<HttpStatusService *>(req->user_ctx);
+    if (self == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    self->requests_total_.fetch_add(1, std::memory_order_relaxed);
+    self->calibration_requests_.fetch_add(1, std::memory_order_relaxed);
+    return self->sendCalibrationStatus(req);
+}
+
+esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
+{
+    auto *self = static_cast<HttpStatusService *>(req->user_ctx);
+    if (self == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    self->requests_total_.fetch_add(1, std::memory_order_relaxed);
+    self->calibration_commands_.fetch_add(1, std::memory_order_relaxed);
+
+    web::CalibrationCommandKind kind = web::CalibrationCommandKind::Stop;
+    bool known = false;
+    for (const PostRoute &route : kCalibrationPosts) {
+        if (std::strcmp(req->uri, route.uri) == 0) {
+            kind = route.kind;
+            known = true;
+            break;
+        }
+    }
+    if (!known) {
+        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_type(req, kJsonContentType);
+        return httpd_resp_send(req, kNotFoundBody, HTTPD_RESP_USE_STRLEN);
+    }
+    if (req->content_len < 0 ||
+        static_cast<std::size_t>(req->content_len) > kMaxCommandBodyBytes) {
+        httpd_resp_set_status(req, "413 Payload Too Large");
+        httpd_resp_set_type(req, kJsonContentType);
+        return httpd_resp_send(req, kTooLargeBody, HTTPD_RESP_USE_STRLEN);
+    }
+
+    char body[kMaxCommandBodyBytes + 1];
+    std::size_t received = 0;
+    const std::size_t total = static_cast<std::size_t>(req->content_len);
+    while (received < total) {
+        const int ret = httpd_req_recv(req, body + received, total - received);
+        if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
+            continue;
+        }
+        if (ret <= 0) {
+            self->request_failures_.fetch_add(1, std::memory_order_relaxed);
+            httpd_resp_set_status(req, "400 Bad Request");
+            httpd_resp_set_type(req, kJsonContentType);
+            return httpd_resp_send(req, kBadRequestBody, HTTPD_RESP_USE_STRLEN);
+        }
+        received += static_cast<std::size_t>(ret);
+    }
+    body[received] = '\0';
+
+    web::CalibrationCommand command{};
+    if (web::parseCalibrationCommand(kind, body, received, command) !=
+        web::CalibrationCommandResult::Ok) {
+        httpd_resp_set_status(req, "400 Bad Request");
+        httpd_resp_set_type(req, kJsonContentType);
+        return httpd_resp_send(req, kBadRequestBody, HTTPD_RESP_USE_STRLEN);
+    }
+
+    calibration_hal::CommandOutcome outcome = calibration_hal::CommandOutcome::InvalidState;
+    switch (kind) {
+        case web::CalibrationCommandKind::CreateSession: {
+            calibration_hal::SessionRequest request{};
+            request.axis = command.axis == 1 ? motion::AxisId::Altitude
+                                             : motion::AxisId::Azimuth;
+            request.direction = command.direction == 1 ? motion::Direction::Backward
+                                                       : motion::Direction::Forward;
+            request.revolutions = command.revolutions;
+            request.repeats = command.repeats;
+            std::uint32_t session = 0;
+            outcome = self->calibration_.createSession(request, session);
+            break;
+        }
+        case web::CalibrationCommandKind::Move:
+            outcome = self->calibration_.move(
+                command.session_id,
+                command.direction == 1 ? motion::Direction::Backward
+                                       : motion::Direction::Forward,
+                command.rate, command.motion_generation);
+            break;
+        case web::CalibrationCommandKind::Stop:
+            outcome = self->calibration_.stop(command.session_id);
+            break;
+        case web::CalibrationCommandKind::ConfirmStart:
+            outcome = self->calibration_.confirmStart(command.session_id);
+            break;
+        case web::CalibrationCommandKind::ConfirmEnd:
+            outcome = self->calibration_.confirmEnd(command.session_id);
+            break;
+        case web::CalibrationCommandKind::Apply:
+            outcome = self->calibration_.apply(command.session_id,
+                                               command.acknowledge_low_repeatability);
+            break;
+        case web::CalibrationCommandKind::Close:
+            outcome = self->calibration_.closeSession(command.session_id);
+            break;
+        case web::CalibrationCommandKind::Reset:
+            outcome = self->calibration_.resetAxis(
+                command.axis == 1 ? motion::AxisId::Altitude : motion::AxisId::Azimuth);
+            break;
+    }
+
+    if (outcome == calibration_hal::CommandOutcome::Ok) {
+        return self->sendCalibrationStatus(req);
+    }
+    char error_body[64];
+    std::snprintf(error_body, sizeof(error_body), "{\"error\":\"%s\"}",
+                  outcomeText(outcome));
+    const char *status = "409 Conflict";
+    if (outcome == calibration_hal::CommandOutcome::InvalidArgument) {
+        status = "400 Bad Request";
+    } else if (outcome == calibration_hal::CommandOutcome::Busy) {
+        status = "429 Too Many Requests";
+    }
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, kJsonContentType);
+    httpd_resp_set_hdr(req, kCacheControl, kNoStore);
+    return httpd_resp_send(req, error_body, HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t HttpStatusService::notFoundHandler(httpd_req_t *req,

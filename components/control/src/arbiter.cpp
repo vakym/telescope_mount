@@ -20,6 +20,8 @@ std::size_t Arbiter::indexOf(SourceId source) noexcept
 int Arbiter::priorityRank(SourceId source) noexcept
 {
     switch (source) {
+        case SourceId::Calibration:
+            return 4;
         case SourceId::Joystick:
             return 3;
         case SourceId::Browser:

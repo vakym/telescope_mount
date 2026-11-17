@@ -102,9 +102,21 @@
     font-size: 12px;
   }
   footer p { margin: 4px 0; }
+  .cal-controls { margin-top: 10px; display: grid; gap: 8px; }
+  .cal-controls > div { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cal-controls button, .cal-controls select, .cal-controls input {
+    background: #1d2830;
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 8px;
+    font-size: 13px;
+  }
+  .cal-controls input[type="number"] { width: 72px; }
+  .cal-message { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
   @media (min-width: 760px) {
     main { grid-template-columns: 1fr 1fr; }
-    #control-card, details.card, footer { grid-column: 1 / -1; }
+    #control-card, #cal-card, details.card, footer { grid-column: 1 / -1; }
   }
 </style>
 </head>
@@ -168,6 +180,42 @@
     </dl>
   </section>
 
+  <section class="card" id="cal-card">
+    <h2>Калибровка масштаба <span id="cal-state" class="pill">—</span><span id="cal-ready" class="pill">—</span></h2>
+    <dl>
+      <div><dt>Сессия / ревизия</dt><dd id="cal-session" class="unknown">—</dd></div>
+      <div><dt>Поколение движения</dt><dd id="cal-generation" class="unknown">—</dd></div>
+      <div><dt>Удержание / lease</dt><dd id="cal-hold" class="unknown">—</dd></div>
+      <div><dt>Измерений</dt><dd id="cal-count" class="unknown">—</dd></div>
+      <div><dt>Азимут, °/полушаг</dt><dd id="cal-az" class="unknown">—</dd></div>
+      <div><dt>Высота, °/полушаг</dt><dd id="cal-alt" class="unknown">—</dd></div>
+      <div><dt>Итог k / разброс</dt><dd id="cal-result" class="unknown">—</dd></div>
+    </dl>
+    <div class="cal-controls">
+      <div>
+        <select id="cal-axis"><option value="azimuth">Азимут</option><option value="altitude">Высота</option></select>
+        <select id="cal-direction"><option value="forward">Вперёд</option><option value="backward">Назад</option></select>
+        <input id="cal-revolutions" type="number" min="1" max="20" value="1" title="Оборотов на измерение">
+        <input id="cal-repeats" type="number" min="1" max="8" value="2" title="Повторов">
+        <button id="cal-create" type="button">Создать сессию</button>
+      </div>
+      <div>
+        <button id="cal-move-forward" type="button" data-dir="1">Движение ▲</button>
+        <button id="cal-move-backward" type="button" data-dir="-1">Движение ▼</button>
+        <input id="cal-rate" type="number" min="10" max="400" value="100" title="Полушагов/с">
+        <button id="cal-stop" type="button">Стоп</button>
+      </div>
+      <div>
+        <button id="cal-confirm-start" type="button">Подтвердить старт</button>
+        <button id="cal-confirm-end" type="button">Подтвердить конец</button>
+        <button id="cal-apply" type="button">Применить</button>
+        <button id="cal-close" type="button">Закрыть</button>
+        <button id="cal-reset" type="button">Сброс к номиналу</button>
+      </div>
+      <p id="cal-message" class="cal-message">Сессия не создана.</p>
+    </div>
+  </section>
+
   <details class="card" id="diag-card">
     <summary>Диагностика</summary>
     <dl>
@@ -188,7 +236,7 @@
 </main>
 
 <footer>
-  <p>Страница только читает состояние. Подключение к ней не даёт владения моторами и не заменяет кнопку останова.</p>
+  <p>Страница читает состояние и отправляет команды калибровки масштаба через сервис калибровки. Подключение к ней не заменяет физический останов и не даёт движения без явного подтверждения.</p>
   <p>Позиция — программный счёт полушагов, не измеренный угол. Скорость — полушаги в секунду.</p>
   <p>Локальный HTTP без шифрования. Секреты точки доступа здесь не публикуются.</p>
 </footer>
@@ -536,7 +584,205 @@
     schedule(0);
   });
 
+  // --- Калибровка масштаба ---
+  var CAL_POLL_MS = 700;
+  var calLast = null;
+  var calMoveTimer = null;
+
+  function calMessage(text) {
+    var node = byId("cal-message");
+    if (node) {
+      node.textContent = text;
+    }
+  }
+
+  function calTerminal(state) {
+    return state === "saved" || state === "save_failed" ||
+           state === "save_uncertain" || state === "cancelled" || state === "error";
+  }
+
+  function calEnable(id, enabled) {
+    var node = byId(id);
+    if (node) {
+      node.disabled = !enabled;
+    }
+  }
+
+  function calButtons(state) {
+    var idle = state === "inactive" || calTerminal(state);
+    calEnable("cal-create", idle);
+    calEnable("cal-reset", idle);
+    calEnable("cal-stop", state === "initial_positioning" || state === "start_ready" ||
+                          state === "measuring" || state === "end_ready");
+    calEnable("cal-confirm-start", state === "start_ready");
+    calEnable("cal-confirm-end", state === "end_ready");
+    calEnable("cal-apply", state === "review");
+    calEnable("cal-close", calTerminal(state));
+    var movable = state === "initial_positioning" || state === "measuring" ||
+                  state === "end_ready";
+    calEnable("cal-move-forward", movable);
+    calEnable("cal-move-backward", movable);
+  }
+
+  function fmtDegrees(nano) {
+    if (typeof nano !== "number" || !isFinite(nano)) {
+      return null;
+    }
+    return (nano / 1e9).toFixed(6);
+  }
+
+  function fmtScale(scale) {
+    if (!scale) {
+      return null;
+    }
+    var text = fmtDegrees(scale.nanodegrees_per_half_step);
+    if (text === null) {
+      return null;
+    }
+    return text + " (" + scale.source + (scale.saved ? ", сохранено" : "") +
+           ", " + scale.persistence + ")";
+  }
+
+  function renderCalibration(data) {
+    if (!data || !data.session) {
+      return;
+    }
+    calLast = data;
+    var s = data.session;
+    setText("cal-state", s.state);
+    setText("cal-ready", s.input_ready ? "готов" : "нет готовности");
+    put("cal-session", s.id + " / " + s.revision);
+    put("cal-generation", s.motion_generation);
+    put("cal-hold", (s.hold_active ? "да" : "нет") + " / " + s.lease_remaining_ms + " мс");
+    put("cal-count", s.measurement_count);
+    var axes = data.axes || [];
+    put("cal-az", fmtScale(axes[0]));
+    put("cal-alt", fmtScale(axes[1]));
+    if (s.result && s.result.ok) {
+      put("cal-result", s.result.degrees_per_half_step.toFixed(6) + " / " +
+                        s.result.spread_ppm + " ppm (" + s.result.repeatability + ")");
+    } else {
+      setUnknown("cal-result");
+    }
+    calButtons(s.state);
+  }
+
+  function calPost(path, body) {
+    return fetch(path, {
+      method: "POST",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {})
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        return { ok: response.ok, status: response.status, data: data };
+      });
+    }).then(function (result) {
+      if (!result.ok) {
+        calMessage("Отказ: " + (result.data && result.data.error ? result.data.error
+                                                                : result.status));
+        return;
+      }
+      calMessage("Готово.");
+      renderCalibration(result.data);
+    }).catch(function () {
+      calMessage("Нет связи с устройством.");
+    });
+  }
+
+  function calSessionId() {
+    return calLast && calLast.session ? calLast.session.id : 0;
+  }
+
+  function pollCalibration() {
+    fetch("/api/calibration", { cache: "no-store" })
+      .then(function (response) {
+        if (!response.ok) {
+          throw new Error("http " + response.status);
+        }
+        return response.json();
+      })
+      .then(renderCalibration)
+      .catch(function () {
+        setText("cal-state", "нет связи");
+      });
+  }
+
+  function sendMove(direction) {
+    if (!calLast || !calLast.session || calLast.session.id === 0) {
+      return;
+    }
+    var rateNode = byId("cal-rate");
+    var rate = rateNode ? Math.abs(parseFloat(rateNode.value) || 100) : 100;
+    calPost("/api/calibration/move", {
+      session_id: calLast.session.id,
+      motion_generation: calLast.session.motion_generation,
+      direction: direction,
+      rate: rate
+    });
+  }
+
+  function stopMoveRepeat() {
+    if (calMoveTimer !== null) {
+      clearInterval(calMoveTimer);
+      calMoveTimer = null;
+    }
+  }
+
+  function bindCalibration() {
+    var create = byId("cal-create");
+    if (!create) {
+      return;
+    }
+    create.addEventListener("click", function () {
+      calPost("/api/calibration/session", {
+        axis: byId("cal-axis").value,
+        direction: byId("cal-direction").value,
+        revolutions: parseInt(byId("cal-revolutions").value, 10) || 1,
+        repeats: parseInt(byId("cal-repeats").value, 10) || 2
+      });
+    });
+    byId("cal-stop").addEventListener("click", function () {
+      stopMoveRepeat();
+      calPost("/api/calibration/stop", { session_id: calSessionId() });
+    });
+    byId("cal-confirm-start").addEventListener("click", function () {
+      calPost("/api/calibration/confirm-start", { session_id: calSessionId() });
+    });
+    byId("cal-confirm-end").addEventListener("click", function () {
+      calPost("/api/calibration/confirm-end", { session_id: calSessionId() });
+    });
+    byId("cal-apply").addEventListener("click", function () {
+      calPost("/api/calibration/apply", { session_id: calSessionId() });
+    });
+    byId("cal-close").addEventListener("click", function () {
+      calPost("/api/calibration/close", { session_id: calSessionId() });
+    });
+    byId("cal-reset").addEventListener("click", function () {
+      calPost("/api/calibration/reset", { axis: byId("cal-axis").value });
+    });
+    [["cal-move-forward", "forward"], ["cal-move-backward", "backward"]]
+      .forEach(function (item) {
+        var button = byId(item[0]);
+        var start = function (event) {
+          event.preventDefault();
+          stopMoveRepeat();
+          sendMove(item[1]);
+          calMoveTimer = setInterval(function () { sendMove(item[1]); }, 150);
+        };
+        button.addEventListener("pointerdown", start);
+        button.addEventListener("pointerup", stopMoveRepeat);
+        button.addEventListener("pointerleave", stopMoveRepeat);
+        button.addEventListener("pointercancel", stopMoveRepeat);
+      });
+    calButtons("inactive");
+    calMessage("Сессия не создана.");
+    pollCalibration();
+    setInterval(pollCalibration, CAL_POLL_MS);
+  }
+
   setHttp("wait");
+  bindCalibration();
   setInterval(tickAges, 1000);
   schedule(0);
 }());

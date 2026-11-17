@@ -66,6 +66,7 @@ ControlService::ControlService(motor_hal::MotorService &motors,
     : motors_(motors), joystick_(joystick), hub_(hub), port_(motors)
 {
     api_mutex_ = xSemaphoreCreateMutexStatic(&api_mutex_storage_);
+    cal_mutex_ = xSemaphoreCreateMutexStatic(&cal_mutex_storage_);
     recovery_mutex_ = xSemaphoreCreateMutexStatic(&recovery_mutex_storage_);
     exit_sem_ = xSemaphoreCreateBinaryStatic(&exit_sem_storage_);
     recovery_done_ = xSemaphoreCreateBinaryStatic(&recovery_done_storage_);
@@ -96,6 +97,16 @@ bool ControlService::lockApi(TickType_t wait) const
 void ControlService::unlockApi() const
 {
     (void)xSemaphoreGive(api_mutex_);
+}
+
+bool ControlService::lockCal(TickType_t wait) const
+{
+    return cal_mutex_ != nullptr && xSemaphoreTake(cal_mutex_, wait) == pdTRUE;
+}
+
+void ControlService::unlockCal() const
+{
+    (void)xSemaphoreGive(cal_mutex_);
 }
 
 void ControlService::setLatch(state::LatchCode latch) noexcept
@@ -154,6 +165,156 @@ bool ControlService::axesReady() const noexcept
 bool ControlService::stoppedConfirmed() const noexcept
 {
     return stop_protocol_.active() && stop_protocol_.confirmed();
+}
+
+bool ControlService::calibrationInputReady(Micros now) const noexcept
+{
+    const std::uint32_t session = calibration_ready_session_.load();
+    const Micros until = calibration_ready_until_.load();
+    return calibration_ready_.load() && session != 0U && until != 0U && now <= until;
+}
+
+void ControlService::revokeMotionPermission() noexcept
+{
+    motion_generation_.fetch_add(1);
+    calibration_permission_active_ = false;
+}
+
+esp_err_t ControlService::requestCalibrationStop(std::uint64_t request_id)
+{
+    if (request_id == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    // Идемпотентность: повтор с тем же или новым id не создаёт вторую
+    // логическую операцию, пока запрос не обработан.
+    std::uint64_t expected = 0;
+    if (!pending_calibration_stop_.compare_exchange_strong(expected, request_id)) {
+        return ESP_OK;
+    }
+    safety_stop_requested_.store(true);
+    return ESP_OK;
+}
+
+CalibrationStopAttestation ControlService::lastStopAttestation() const
+{
+    CalibrationStopAttestation copy{};
+    if (!lockCal(portMAX_DELAY)) {
+        return copy;
+    }
+    copy = attestation_;
+    unlockCal();
+    return copy;
+}
+
+esp_err_t ControlService::beginCalibrationHold(motion::AxisId axis, std::uint32_t session,
+                                               Micros absolute_deadline_us)
+{
+    const std::size_t index = indexOf(axis);
+    if (index >= 2 || session == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lockCal(portMAX_DELAY)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    CalibrationHold &hold = calibration_hold_[index];
+    if (hold.active && hold.session == session) {
+        // Повтор не перезаписывает исходную политику и не расширяет предел.
+        if (absolute_deadline_us != 0U &&
+            (hold.deadline == 0U || absolute_deadline_us < hold.deadline)) {
+            hold.deadline = absolute_deadline_us;
+        }
+        unlockCal();
+        return ESP_OK;
+    }
+    HoldRequest &request = hold_request_[index];
+    request.pending = true;
+    request.begin = true;
+    request.session = session;
+    request.deadline = absolute_deadline_us;
+    unlockCal();
+    return ESP_OK;
+}
+
+esp_err_t ControlService::endCalibrationHold(motion::AxisId axis, std::uint32_t session)
+{
+    const std::size_t index = indexOf(axis);
+    if (index >= 2 || session == 0U) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lockCal(portMAX_DELAY)) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    HoldRequest &request = hold_request_[index];
+    request.pending = true;
+    request.begin = false;
+    request.session = session;
+    request.deadline = 0;
+    unlockCal();
+    return ESP_OK;
+}
+
+bool ControlService::calibrationHoldActive(motion::AxisId axis, std::uint32_t session) const
+{
+    const std::size_t index = indexOf(axis);
+    if (index >= 2 || !lockCal(10)) {
+        return false;
+    }
+    const bool active = calibration_hold_[index].active &&
+                        calibration_hold_[index].session == session;
+    unlockCal();
+    return active;
+}
+
+motion::HoldPolicy ControlService::holdPolicy(motion::AxisId axis) const
+{
+    return port_.holdPolicy(axis);
+}
+
+void ControlService::setCalibrationInputReady(bool ready, std::uint32_t session, Micros valid_until_us)
+{
+    if (!ready) {
+        calibration_ready_.store(false);
+        calibration_ready_until_.store(0);
+        return;
+    }
+    if (session == 0U || valid_until_us == 0U) {
+        return;
+    }
+    calibration_ready_session_.store(session);
+    calibration_ready_until_.store(valid_until_us);
+    calibration_ready_.store(true);
+}
+
+std::uint32_t ControlService::motionGeneration() const
+{
+    return motion_generation_.load();
+}
+
+esp_err_t ControlService::beginFlashWindow(Micros timeout_us)
+{
+    if (flash_window_active_.load()) {
+        return ESP_OK;
+    }
+    const Micros deadline = nowUs() + (timeout_us == 0U ? 10'000'000U : timeout_us);
+    flash_window_requested_us_.store(deadline);
+    flash_window_requested_.store(true);
+    return ESP_OK;
+}
+
+void ControlService::endFlashWindow()
+{
+    flash_window_requested_.store(false);
+    flash_window_active_.store(false);
+}
+
+bool ControlService::flashWindowActive() const
+{
+    return flash_window_active_.load();
+}
+
+bool ControlService::calibrationInputReady() const
+{
+    return calibrationInputReady(nowUs());
 }
 
 esp_err_t ControlService::start(const control::JoyMappingConfig &mapping)
@@ -222,6 +383,26 @@ esp_err_t ControlService::start(const control::JoyMappingConfig &mapping)
     safety_stop_requested_.store(false);
     shutdown_requested_.store(false);
     stop_failed_.store(false);
+
+    (void)xSemaphoreTake(cal_mutex_, portMAX_DELAY);
+    for (std::size_t i = 0; i < 2; ++i) {
+        hold_request_[i] = HoldRequest{};
+        calibration_hold_[i] = CalibrationHold{};
+    }
+    attestation_ = CalibrationStopAttestation{};
+    (void)xSemaphoreGive(cal_mutex_);
+    calibration_ready_.store(false);
+    calibration_ready_session_.store(0);
+    calibration_ready_until_.store(0);
+    motion_generation_.store(0);
+    pending_calibration_stop_.store(0);
+    flash_window_requested_.store(false);
+    flash_window_requested_us_.store(0);
+    flash_window_active_.store(false);
+    calibration_permission_active_ = false;
+    calibration_ready_seen_ = false;
+    require_neutral_after_calibration_ = false;
+    calibration_released_us_ = 0;
 
     for (std::size_t i = 0; i < 2; ++i) {
         axis_polled_[i] = 0;
@@ -567,6 +748,7 @@ void ControlService::applyExternalIntents(Micros now)
     control::IntentInbox::Event events[control::IntentInbox::kEventCapacity]{};
     const std::size_t event_count = inbox_.drainEvents(events, control::IntentInbox::kEventCapacity);
     for (std::size_t i = 0; i < event_count; ++i) {
+        const state::SourceId before = arbiter_.owner();
         control::DenyReason deny = control::DenyReason::None;
         arbiter_.applyOwnership(events[i].source,
                                 events[i].kind == control::IntentInbox::EventKind::Claim,
@@ -574,6 +756,12 @@ void ControlService::applyExternalIntents(Micros now)
                                 events[i].session, now, deny);
         if (deny != control::DenyReason::None) {
             ++rejected_intents_;
+        }
+        if (before == state::SourceId::Calibration &&
+            arbiter_.owner() != state::SourceId::Calibration) {
+            // Возврат джойстику требует новой нейтрали после освобождения.
+            require_neutral_after_calibration_ = true;
+            calibration_released_us_ = now;
         }
     }
 
@@ -639,12 +827,25 @@ void ControlService::applyJoystick(Micros now)
         neutral_tracking_ = false;
     }
 
-    const bool claim = !neutral && !release &&
+    if (require_neutral_after_calibration_) {
+        const bool fresh = state::freshness(now, joystick_obs_.meta.measured_us,
+                                            CONFIG_CTRL_AXIS_STALE_US) ==
+                           state::Freshness::Fresh;
+        if (neutral && fresh && joystick_obs_.meta.measured_us > calibration_released_us_) {
+            require_neutral_after_calibration_ = false;
+        }
+    }
+
+    const bool claim = !require_neutral_after_calibration_ && !neutral && !release &&
                        arbiter_.owner() != state::SourceId::Joystick &&
                        !arbiter_.handoverPending();
     control::DenyReason deny = control::DenyReason::None;
     arbiter_.applyOwnership(state::SourceId::Joystick, claim, release, 1, now, deny);
     if (deny != control::DenyReason::None) {
+        ++rejected_intents_;
+    }
+    if (require_neutral_after_calibration_ && !neutral && !release) {
+        // Джойстик отклонён до новой нейтрали: это наблюдаемо.
         ++rejected_intents_;
     }
     if (!release) {
@@ -681,6 +882,43 @@ void ControlService::sendRates(const control::ArbitratedSetpoint &setpoint)
     }
 }
 
+void ControlService::captureStopAttestation(Micros now)
+{
+    (void)now;
+    // Ровно одна логическая отмена разрешения на подтверждённый останов:
+    // executeStop() не вызывается повторно для подтверждённого протокола.
+    revokeMotionPermission();
+
+    const std::uint64_t request_id = stop_protocol_.requestId();
+    if (request_id == 0U) {
+        return;
+    }
+    CalibrationStopAttestation attestation{};
+    attestation.valid = true;
+    attestation.confirmed = true;
+    attestation.request_id = request_id;
+    attestation.requested_us = stop_protocol_.requestedUs();
+    attestation.confirmed_us = stop_protocol_.confirmedUs();
+    attestation.immediate = stop_protocol_.mode() == control::StopMode::Immediate;
+    for (std::size_t i = 0; i < 2; ++i) {
+        const control::CommandTicket ticket = stop_protocol_.ticket(i);
+        attestation.ticket_id[i] = ticket.id;
+        attestation.epoch[i] = ticket.epoch;
+        attestation.position_step[i] = axis_[i].position_step;
+        attestation.polled_us[i] = axis_polled_[i];
+        attestation.position_trusted[i] =
+            axis_[i].position_trusted && !axis_[i].has_fault;
+        attestation.energized[i] = axis_[i].energized;
+    }
+    attestation.motion_generation = motion_generation_.load();
+
+    if (lockCal(portMAX_DELAY)) {
+        attestation_ = attestation;
+        unlockCal();
+    }
+    pending_calibration_stop_.store(0);
+}
+
 void ControlService::executeStop(Micros now)
 {
     if (!stop_protocol_.active() || stop_protocol_.confirmed()) {
@@ -713,6 +951,7 @@ void ControlService::executeStop(Micros now)
     switch (stop_protocol_.check(observations, now)) {
         case control::StopProtocol::Decision::Confirmed:
             stop_confirmed_flag_ = true;
+            captureStopAttestation(now);
             break;
         case control::StopProtocol::Decision::Escalate:
             if (stop_protocol_.escalate(now)) {
@@ -746,12 +985,15 @@ void ControlService::driveLoop(Micros now)
     const control::ArbitratedSetpoint setpoint = arbiter_.arbitrate(nowUs());
 
     control::ArmingInputs inputs{};
-    inputs.permit = permit_requested_.load();
+    inputs.permit = permit_requested_.load() && !flash_window_active_.load();
     inputs.neutral_confirmed =
         conversion_.ok && conversion_.neutral &&
         state::freshness(nowUs(), joystick_obs_.meta.measured_us,
                          CONFIG_CTRL_AXIS_STALE_US) == state::Freshness::Fresh;
     inputs.input_usable = input_usable_;
+    inputs.selected_source = arbiter_.owner();
+    inputs.calibration_input_ready =
+        inputs.selected_source == state::SourceId::Calibration && calibrationInputReady(nowUs());
     inputs.motor_fault = axesHaveFault();
     inputs.axes_ready = axesReady();
     // Потеря готовности уже разрешённой оси: останов пары и защёлка.
@@ -779,11 +1021,28 @@ void ControlService::driveLoop(Micros now)
     setLatch(decision.latch);
 
     if (decision.revoke_ownership) {
-        arbiter_.release(arbiter_.owner(), nowUs());
+        const state::SourceId previous = arbiter_.owner();
+        arbiter_.release(previous, nowUs());
+        if (previous == state::SourceId::Calibration) {
+            require_neutral_after_calibration_ = true;
+            calibration_released_us_ = nowUs();
+        }
         // При передаче владения претендент сохраняется до revalidateClaim.
         if (decision.stop_reason != control::StopReason::Handover) {
             arbiter_.cancelHandover();
         }
+    }
+
+    // Отзыв разрешения: переход «действовало → отозвано» увеличивает
+    // поколение ровно один раз.
+    const bool calibration_permission =
+        inputs.selected_source == state::SourceId::Calibration &&
+        inputs.calibration_input_ready && decision.latch == state::LatchCode::None;
+    if (calibration_permission) {
+        calibration_permission_active_ = true;
+    } else if (calibration_permission_active_) {
+        revokeMotionPermission();
+        safety_stop_requested_.store(true);
     }
 
     if (decision.request_stop && !stop_protocol_.active()) {
@@ -793,6 +1052,7 @@ void ControlService::driveLoop(Micros now)
         start.now_us = nowUs();
         start.baseline_epoch[0] = axis_[0].command_epoch;
         start.baseline_epoch[1] = axis_[1].command_epoch;
+        start.request_id = pending_calibration_stop_.exchange(0);
         stop_protocol_.begin(start);
         arming_.noteStopIssued(decision.stop_reason);
         stop_failed_flag_ = false;
@@ -827,8 +1087,22 @@ void ControlService::driveLoop(Micros now)
 
     if (stop_protocol_.active()) {
         executeStop(nowUs());
-    } else if (decision.allow_nonzero) {
+    } else if (decision.allow_nonzero && !flash_window_active_.load()) {
         sendRates(setpoint);
+    }
+
+    // Окно записи NVS открывается только после подтверждённого останова и
+    // покоя обеих осей.
+    if (flash_window_requested_.load() && !flash_window_active_.load()) {
+        const bool at_rest = control::StopProtocol::axisAtRest(axis_[0]) &&
+                             control::StopProtocol::axisAtRest(axis_[1]);
+        const bool stopped = !stop_protocol_.active() || stop_protocol_.confirmed();
+        if (at_rest && stopped) {
+            flash_window_active_.store(true);
+            flash_window_requested_.store(false);
+        } else if (nowUs() > flash_window_requested_us_.load()) {
+            flash_window_requested_.store(false);
+        }
     }
 
     if (decision.handover_complete) {
@@ -968,18 +1242,120 @@ void ControlService::runRecovery()
     }
 }
 
+void ControlService::applyCalibrationRequests(Micros now)
+{
+    // 1. Двухфазные заявки на временное удержание опорной точки.
+    for (std::size_t i = 0; i < 2; ++i) {
+        HoldRequest request{};
+        bool have = false;
+        if (lockCal(portMAX_DELAY)) {
+            if (hold_request_[i].pending) {
+                request = hold_request_[i];
+                hold_request_[i] = HoldRequest{};
+                have = true;
+            }
+            unlockCal();
+        }
+        if (!have) {
+            continue;
+        }
+        const motion::AxisId id = static_cast<motion::AxisId>(i);
+        CalibrationHold &hold = calibration_hold_[i];
+        if (request.begin) {
+            if (!hold.active || hold.session != request.session) {
+                // Исходная политика берётся из конфигурации, а не угадывается.
+                hold.original = port_.holdPolicy(id);
+                hold.active = true;
+                hold.session = request.session;
+                hold.deadline = request.deadline;
+                calibration_ready_seen_ = false;
+                (void)port_.setHoldPolicy(id, motion::HoldPolicy{true, 0});
+            } else if (request.deadline != 0U &&
+                       (hold.deadline == 0U || request.deadline < hold.deadline)) {
+                hold.deadline = request.deadline;  // не расширяем
+            }
+        } else if (hold.active && hold.session == request.session) {
+            // Идемпотентно: восстанавливаем сохранённую исходную политику.
+            if (port_.setHoldPolicy(id, hold.original)) {
+                hold = CalibrationHold{};
+            }
+        }
+    }
+
+    const state::SourceId owner = arbiter_.owner();
+    const bool ready = owner == state::SourceId::Calibration && calibrationInputReady(now);
+    if (ready) {
+        calibration_ready_seen_ = true;
+    }
+    const bool readiness_lost = calibration_ready_seen_ && !ready;
+
+    // 2. Абсолютный предел удержания и потеря пригодности источника.
+    for (std::size_t i = 0; i < 2; ++i) {
+        CalibrationHold &hold = calibration_hold_[i];
+        if (!hold.active) {
+            continue;
+        }
+        const motion::AxisId id = static_cast<motion::AxisId>(i);
+        const bool deadline_hit = hold.deadline != 0U && now >= hold.deadline;
+        const bool may_restore =
+            deadline_hit ||
+            (readiness_lost && (stop_protocol_.confirmed() ||
+                                control::StopProtocol::axisAtRest(axis_[i])));
+        if (!may_restore) {
+            continue;
+        }
+        if (!port_.setHoldPolicy(id, hold.original)) {
+            continue;
+        }
+        hold = CalibrationHold{};
+        if (deadline_hit) {
+            revokeMotionPermission();
+            safety_stop_requested_.store(true);
+        }
+    }
+
+    if (readiness_lost && calibration_permission_active_) {
+        revokeMotionPermission();
+        safety_stop_requested_.store(true);
+    }
+}
+
 void ControlService::cycle()
 {
     const Micros now = nowUs();
     ++cycles_;
 
     pollInputs(now);
-    applyExternalIntents(now);
-    applyJoystick(now);
+    if (!flash_window_active_.load()) {
+        applyExternalIntents(now);
+        applyJoystick(now);
+    }
     arbiter_.expire(now);
 
     if (arbiter_.consumeOwnerExpired()) {
         permit_requested_.store(false);
+        revokeMotionPermission();
+        safety_stop_requested_.store(true);
+        if (calibration_hold_[0].active || calibration_hold_[1].active) {
+            require_neutral_after_calibration_ = true;
+            calibration_released_us_ = now;
+        }
+    }
+
+    applyCalibrationRequests(now);
+
+    // Запрос окна записи NVS: движение запрещается до подтверждённого покоя.
+    if (flash_window_requested_.load() && !flash_window_active_.load()) {
+        permit_requested_.store(false);
+        const state::SourceId previous = arbiter_.owner();
+        if (previous != state::SourceId::None) {
+            arbiter_.release(previous, now);
+            arbiter_.cancelHandover();
+            if (previous == state::SourceId::Calibration) {
+                require_neutral_after_calibration_ = true;
+                calibration_released_us_ = now;
+            }
+        }
         safety_stop_requested_.store(true);
     }
 

@@ -22,5 +22,5 @@ idf_component_register(
     SRCS ${web_sources}
     INCLUDE_DIRS "include"
     EMBED_FILES ${web_embeds}
-    REQUIRES web state state_hal wifi_hal esp_http_server esp_timer
+    REQUIRES web state state_hal wifi_hal calibration_hal esp_http_server esp_timer
 )

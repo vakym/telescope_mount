@@ -29,6 +29,12 @@ struct ArmingInputs {
     bool permit = false;             ///< разрешение выдано
     bool neutral_confirmed = false;  ///< свежая подтверждённая нейтраль
     bool input_usable = false;       ///< уставки формируются (ok или grace)
+    /// Текущий владелец арбитража. Проверка входа выполняется по выбранному
+    /// источнику, а не объединением: исправный джойстик не маскирует отказ
+    /// калибровки и наоборот.
+    state::SourceId selected_source = state::SourceId::None;
+    /// Пригодность калибровочного входа (владение + сессия + удержание + lease).
+    bool calibration_input_ready = false;
     bool motor_fault = false;        ///< Fault хотя бы одной оси
     bool axes_ready = false;         ///< свежий опрос: нет Fault и не Disabled
     /// Ось перестала быть готовой уже после разрешения (Disabled/Fault).

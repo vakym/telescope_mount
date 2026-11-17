@@ -33,6 +33,10 @@
 #include "web/shutdown_protocol.hpp"
 #include "wifi_hal/wifi_ap_service.hpp"
 
+namespace calibration_hal {
+class CalibrationService;
+}
+
 namespace web_hal {
 
 /// Снимок счётчиков для существующего heartbeat-лога main.
@@ -43,6 +47,8 @@ struct HttpStatusCounters {
     std::uint32_t requests_total = 0;
     std::uint32_t page_requests = 0;
     std::uint32_t state_requests = 0;
+    std::uint32_t calibration_requests = 0;
+    std::uint32_t calibration_commands = 0;
     std::uint32_t request_failures = 0;
     std::uint32_t serialize_overflows = 0;
 
@@ -57,7 +63,8 @@ struct HttpStatusCounters {
 class HttpStatusService {
 public:
     HttpStatusService(state_hal::StateHub &hub,
-                      wifi_hal::WifiApService &access_point);
+                      wifi_hal::WifiApService &access_point,
+                      calibration_hal::CalibrationService &calibration);
     ~HttpStatusService();
 
     HttpStatusService(const HttpStatusService &) = delete;
@@ -117,12 +124,17 @@ private:
 
     static esp_err_t pageHandler(httpd_req_t *req);
     static esp_err_t stateHandler(httpd_req_t *req);
+    static esp_err_t calibrationStatusHandler(httpd_req_t *req);
+    /// Один обработчик на все POST-маршруты: тип команды определяется URI.
+    static esp_err_t calibrationCommandHandler(httpd_req_t *req);
+    esp_err_t sendCalibrationStatus(httpd_req_t *req);
     static esp_err_t notFoundHandler(httpd_req_t *req, httpd_err_code_t error);
     static esp_err_t methodNotAllowedHandler(httpd_req_t *req,
                                              httpd_err_code_t error);
 
     state_hal::StateHub &hub_;
     wifi_hal::WifiApService &access_point_;
+    calibration_hal::CalibrationService &calibration_;
 
     ServerPortImpl port_;
     web::ServerController controller_;
@@ -156,6 +168,8 @@ private:
     std::atomic<std::uint32_t> requests_total_{0};
     std::atomic<std::uint32_t> page_requests_{0};
     std::atomic<std::uint32_t> state_requests_{0};
+    std::atomic<std::uint32_t> calibration_requests_{0};
+    std::atomic<std::uint32_t> calibration_commands_{0};
     std::atomic<std::uint32_t> request_failures_{0};
     std::atomic<std::uint32_t> serialize_overflows_{0};
     std::atomic<std::uint32_t> starts_{0};

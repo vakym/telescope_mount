@@ -54,6 +54,8 @@ void StopProtocol::reset() noexcept
     reason_ = StopReason::InputLoss;
     mode_ = StopMode::Smooth;
     requested_us_ = 0;
+    confirmed_us_ = 0;
+    request_id_ = 0;
     sent_[0] = false;
     sent_[1] = false;
     ticket_[0] = CommandTicket{};
@@ -70,6 +72,8 @@ void StopProtocol::begin(const Start &start) noexcept
     reason_ = start.reason;
     mode_ = start.mode;
     requested_us_ = start.now_us;
+    confirmed_us_ = 0;
+    request_id_ = start.request_id;
     sent_[0] = false;
     sent_[1] = false;
     ticket_[0] = CommandTicket{};
@@ -150,6 +154,9 @@ StopProtocol::Decision StopProtocol::check(const StopObservation (&obs)[2],
         return Decision::Confirmed;
     }
     if (axisConfirmed(obs[0], 0) && axisConfirmed(obs[1], 1)) {
+        if (!confirmed_) {
+            confirmed_us_ = now_us > requested_us_ ? now_us : requested_us_;
+        }
         confirmed_ = true;
         return Decision::Confirmed;
     }

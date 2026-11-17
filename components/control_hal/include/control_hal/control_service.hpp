@@ -38,6 +38,25 @@
 
 namespace control_hal {
 
+/// Доказательство подтверждённого останова для калибровки.
+/// Заполняется управляющей задачей при `Decision::Confirmed` и **не**
+/// стирается обычным `stop_protocol_.reset()`.
+struct CalibrationStopAttestation {
+    bool valid = false;
+    std::uint64_t request_id = 0;
+    std::uint64_t ticket_id[2] = {0, 0};
+    std::uint32_t epoch[2] = {0, 0};
+    std::int64_t position_step[2] = {0, 0};
+    state::Micros requested_us = 0;
+    state::Micros confirmed_us = 0;
+    state::Micros polled_us[2] = {0, 0};
+    bool position_trusted[2] = {false, false};
+    bool energized[2] = {false, false};
+    bool immediate = false;
+    bool confirmed = false;
+    std::uint32_t motion_generation = 0;
+};
+
 /// Снимок состояния контура для диагностики и будущего UI.
 struct ControlStatus {
     state::ControlPhase phase = state::ControlPhase::Disarmed;
@@ -92,6 +111,43 @@ public:
     /// Неблокирующая передача намерения будущих Browser и Automation.
     esp_err_t submitIntent(const control::Intent &intent);
 
+    /// Приоритетный запрос останова для калибровки. Не блокирует: задача
+    /// запустит StopProtocol и увеличит motion_generation один раз на
+    /// логический останов. Повтор с тем же request_id не создаёт операцию.
+    esp_err_t requestCalibrationStop(std::uint64_t request_id);
+
+    /// Копия последнего подтверждённого останова; моторы не вызывает.
+    CalibrationStopAttestation lastStopAttestation() const;
+
+    /// Временное бессрочное удержание оси на время сессии. Исходная политика
+    /// сохраняется и восстанавливается `endCalibrationHold`. Применяется
+    /// управляющей задачей; возврат — только факт постановки запроса.
+    esp_err_t beginCalibrationHold(motion::AxisId axis, std::uint32_t session,
+                                   state::Micros absolute_deadline_us);
+    esp_err_t endCalibrationHold(motion::AxisId axis, std::uint32_t session);
+    bool calibrationHoldActive(motion::AxisId axis, std::uint32_t session) const;
+
+    /// Текущая (возможно временная) политика удержания оси.
+    motion::HoldPolicy holdPolicy(motion::AxisId axis) const;
+
+    /// Публикация пригодности калибровочного входа с lease. Истёкший lease
+    /// считается ложью; исправный джойстик отказ не маскирует.
+    void setCalibrationInputReady(bool ready, std::uint32_t session,
+                                  state::Micros valid_until_us);
+
+    /// Текущее поколение разрешения движения.
+    std::uint32_t motionGeneration() const;
+
+    /// Окно записи NVS: запрещает движение до `endFlashWindow`. Запрос
+    /// ставится в очередь; вызывающий ждёт `flashWindowActive()` и по
+    /// таймауту считает окно не открытым.
+    esp_err_t beginFlashWindow(state::Micros timeout_us);
+    void endFlashWindow();
+    bool flashWindowActive() const;
+
+    /// Текущая пригодность калибровочного входа с учётом lease.
+    bool calibrationInputReady() const;
+
     /// Асинхронный запрос; 0 — взять CONFIG_CTRL_ACK_TIMEOUT_MS.
     esp_err_t acknowledgeFault(state::Micros timeout_us = 0);
 
@@ -117,10 +173,33 @@ private:
         esp_err_t result = ESP_OK;
     };
 
+    /// Двухфазная заявка на временное удержание (применяется задачей).
+    struct HoldRequest {
+        bool pending = false;
+        bool begin = true;
+        std::uint32_t session = 0;
+        state::Micros deadline = 0;
+    };
+
+    /// Защищено cal_mutex_.
+    struct CalibrationHold {
+        bool active = false;
+        std::uint32_t session = 0;
+        motion::HoldPolicy original{};
+        state::Micros deadline = 0;
+    };
+
     static void taskEntry(void *arg);
     void run();
     void cycle();
     void finishShutdown();
+
+    void applyCalibrationRequests(state::Micros now_us);
+    void captureStopAttestation(state::Micros now_us);
+    void revokeMotionPermission() noexcept;
+    bool calibrationInputReady(state::Micros now_us) const noexcept;
+    bool lockCal(TickType_t wait) const;
+    void unlockCal() const;
 
     void pollInputs(state::Micros now_us);
     void applyExternalIntents(state::Micros now_us);
@@ -163,6 +242,8 @@ private:
 
     StaticSemaphore_t api_mutex_storage_{};
     SemaphoreHandle_t api_mutex_ = nullptr;
+    StaticSemaphore_t cal_mutex_storage_{};
+    SemaphoreHandle_t cal_mutex_ = nullptr;
     StaticSemaphore_t recovery_mutex_storage_{};
     SemaphoreHandle_t recovery_mutex_ = nullptr;
     StaticSemaphore_t exit_sem_storage_{};
@@ -174,6 +255,19 @@ private:
     std::atomic<bool> safety_stop_requested_{false};
     std::atomic<bool> shutdown_requested_{false};
     std::atomic<bool> stop_failed_{false};
+
+    // Калибровка: заявки и результаты под cal_mutex_.
+    HoldRequest hold_request_[2]{};
+    CalibrationHold calibration_hold_[2]{};
+    CalibrationStopAttestation attestation_{};
+    std::atomic<bool> calibration_ready_{false};
+    std::atomic<std::uint32_t> calibration_ready_session_{0};
+    std::atomic<state::Micros> calibration_ready_until_{0};
+    std::atomic<std::uint32_t> motion_generation_{0};
+    std::atomic<std::uint64_t> pending_calibration_stop_{0};
+    std::atomic<bool> flash_window_requested_{false};
+    std::atomic<state::Micros> flash_window_requested_us_{0};
+    std::atomic<bool> flash_window_active_{false};
 
     RecoveryRecord recovery_{};
     /// Защищён recovery_mutex_: согласует отмену с терминальным переходом.
@@ -208,6 +302,12 @@ private:
     bool neutral_tracking_ = false;
     state::Micros neutral_since_ = 0;
     std::uint64_t last_stop_ticket_[2] = {0, 0};
+
+    // Калибровка: пишет и читает только задача.
+    bool calibration_permission_active_ = false;
+    bool calibration_ready_seen_ = false;
+    bool require_neutral_after_calibration_ = false;
+    state::Micros calibration_released_us_ = 0;
 };
 
 }  // namespace control_hal

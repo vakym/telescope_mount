@@ -17,7 +17,16 @@
 namespace state {
 
 /// Источник намерений управления.
-enum class SourceId : std::uint8_t { None = 0, Joystick, Browser, Automation, Count };
+/// Calibration стоит выше Joystick: калибровка опорной точки не должна
+/// маскироваться здоровым, но чужим источником.
+enum class SourceId : std::uint8_t {
+    None = 0,
+    Joystick,
+    Browser,
+    Automation,
+    Calibration,
+    Count
+};
 
 constexpr std::size_t kSourceCount = static_cast<std::size_t>(SourceId::Count);
 
@@ -55,7 +64,9 @@ enum class DenyReason : std::uint8_t {
     DeliveryFailed,
     StopInProgress,
     NotReady,
-    Busy
+    Busy,
+    /// Требуется подтверждённая нейтраль перед выдачей движения.
+    NeutralRequired
 };
 
 const char *sourceName(SourceId source) noexcept;

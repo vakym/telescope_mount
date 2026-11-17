@@ -18,6 +18,8 @@ const char *sourceName(SourceId source) noexcept
             return "browser";
         case SourceId::Automation:
             return "automation";
+        case SourceId::Calibration:
+            return "calibration";
         case SourceId::Count:
             break;
     }
@@ -129,6 +131,8 @@ const char *denyName(DenyReason reason) noexcept
             return "not_ready";
         case DenyReason::Busy:
             return "busy";
+        case DenyReason::NeutralRequired:
+            return "neutral_required";
     }
     return "unknown";
 }

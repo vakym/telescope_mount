@@ -45,6 +45,7 @@ esp_err_t MotorService::start(const board::MotorPins &pins, const motion::AxisCo
         const auto id = static_cast<motion::AxisId>(i);
         ESP_RETURN_ON_FALSE(motion_.configure(id, configs[i]), ESP_ERR_INVALID_ARG,
                             kTag, "invalid axis config for axis %u", static_cast<unsigned>(i));
+        hold_policy_[i] = configs[i].hold;
     }
 
     const esp_err_t azimuth_err = motors_[0].start(motion_.planner(motion::AxisId::Azimuth),
@@ -154,9 +155,25 @@ bool MotorService::energize(motion::AxisId id)
 
 bool MotorService::setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
 {
-    return valid(id) && motors_[static_cast<std::size_t>(id)]
-                            .post(motion::AxisCommand::setHoldPolicy(policy))
-                            .accepted;
+    if (!valid(id)) {
+        return false;
+    }
+    const bool accepted =
+        motors_[static_cast<std::size_t>(id)]
+            .post(motion::AxisCommand::setHoldPolicy(policy))
+            .accepted;
+    if (accepted) {
+        hold_policy_[static_cast<std::size_t>(id)] = policy;
+    }
+    return accepted;
+}
+
+motion::HoldPolicy MotorService::holdPolicy(motion::AxisId id) const
+{
+    if (!valid(id)) {
+        return motion::HoldPolicy{};
+    }
+    return hold_policy_[static_cast<std::size_t>(id)];
 }
 
 CommandReceipt MotorService::resetFault(motion::AxisId id)

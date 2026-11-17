@@ -1,0 +1,86 @@
+menu "Calibration (axis scale)"
+
+    config CAL_READINESS_LEASE_MS
+        int "Срок жизни признака пригодности калибровочного входа"
+        default 1000
+        range 100 5000
+        help
+            Пока сервис калибровки не обновил признак, управляющий слой
+            считает вход непригодным и уходит в останов.
+
+    config CAL_READINESS_REFRESH_MS
+        int "Период обновления признака пригодности"
+        default 250
+        range 50 2000
+
+    config CAL_MAX_REFERENCE_HOLD_MS
+        int "Абсолютный предел удержания опорной точки, мс"
+        default 600000
+        range 60000 3600000
+
+    config CAL_REFERENCE_CONFIRM_TIMEOUT_MS
+        int "Таймаут подтверждения опорной точки, мс"
+        default 180000
+        range 10000 900000
+
+    config CAL_SESSION_IDLE_TIMEOUT_MS
+        int "Таймаут бездействия сессии, мс"
+        default 600000
+        range 60000 3600000
+
+    config CAL_MOVE_LEASE_MS
+        int "Срок действия команды движения, мс"
+        default 300
+        range 100 2000
+
+    config CAL_MAX_CONTINUOUS_MOVE_MS
+        int "Предел одного непрерывного движения, мс"
+        default 60000
+        range 5000 300000
+
+    config CAL_MAX_REQUESTS_PER_SEC
+        int "Предел запросов калибровки в секунду"
+        default 20
+        range 1 100
+
+    config CAL_STOP_REQUESTS_PER_SEC
+        int "Отдельный предел команды stop в секунду"
+        default 10
+        range 1 50
+
+    config CAL_MAX_MEASUREMENTS
+        int "Максимум измерений в сессии"
+        default 8
+        range 2 8
+
+    config CAL_MIN_MEASUREMENTS
+        int "Минимум измерений для применения"
+        default 2
+        range 1 8
+
+    config CAL_MAX_SPREAD_PPM
+        int "Порог повторяемости, ppm"
+        default 5000
+        range 100 50000
+
+    config CAL_AZ_NOMINAL_HALF_STEPS_PER_REVOLUTION
+        int "Номинал азимутальной оси: полушагов на оборот"
+        default 4096
+        range 64 1000000
+
+    config CAL_ALT_NOMINAL_HALF_STEPS_PER_REVOLUTION
+        int "Номинал оси высоты: полушагов на оборот"
+        default 4096
+        range 64 1000000
+
+    config CAL_MAX_RATE_HALF_STEPS_PER_S
+        int "Предел скорости калибровки, полушагов/с"
+        default 400
+        range 10 1000
+
+    config CAL_TASK_PERIOD_MS
+        int "Период задачи калибровки, мс"
+        default 20
+        range 10 200
+
+endmenu

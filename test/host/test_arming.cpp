@@ -258,6 +258,73 @@ void shutdownFromAnyPhase()
     // Active и Stopping уже покрыты выше.
 }
 
+void calibrationSourceBranches()
+{
+    ArmingMachine machine = makeMachine();
+    ArmingInputs inputs{};
+    inputs.permit = true;
+    inputs.selected_source = state::SourceId::Calibration;
+    // Джойстик исправен, но выбран источник калибровки.
+    inputs.input_usable = true;
+    inputs.neutral_confirmed = true;
+    (void)machine.step(inputs);
+    CHECK(machine.phase() == ControlPhase::WaitingForNeutral);
+
+    // Пригодность калибровки не подтверждена: движения нет.
+    inputs.permit = true;
+    const ArmingDecision blocked = machine.step(inputs);
+    CHECK(blocked.phase == ControlPhase::WaitingForNeutral);
+    CHECK(!blocked.allow_nonzero);
+
+    inputs.calibration_input_ready = true;
+    const ArmingDecision enabling = machine.step(inputs);
+    CHECK(enabling.send_enable);
+    inputs.axes_ready = true;
+    const ArmingDecision active = machine.step(inputs);
+    CHECK(active.phase == ControlPhase::Active);
+    CHECK(active.allow_nonzero);
+
+    // Истёкший lease калибровки даёт InputLoss, даже если джойстик в норме.
+    inputs.calibration_input_ready = false;
+    const ArmingDecision lost = machine.step(inputs);
+    CHECK(lost.phase == ControlPhase::Stopping);
+    CHECK(lost.stop_reason == control::StopReason::InputLoss);
+    CHECK(lost.request_stop);
+}
+
+void joystickHealthyDoesNotMaskCalibrationFailure()
+{
+    ArmingMachine machine = makeMachine();
+    ArmingInputs inputs{};
+    inputs.permit = true;
+    inputs.selected_source = state::SourceId::Joystick;
+    inputs.input_usable = true;
+    inputs.neutral_confirmed = true;
+    (void)machine.step(inputs);
+    (void)machine.step(inputs);
+    inputs.axes_ready = true;
+    const ArmingDecision active = machine.step(inputs);
+    CHECK(active.phase == ControlPhase::Active);
+
+    // Калибровка не выбрана, поэтому её готовность не влияет.
+    inputs.calibration_input_ready = false;
+    const ArmingDecision still = machine.step(inputs);
+    CHECK(still.phase == ControlPhase::Active);
+    CHECK(still.allow_nonzero);
+}
+
+void activeWithoutUsableInputHasNoNonzero()
+{
+    ArmingMachine machine = makeMachine();
+    activate(machine);
+    ArmingInputs inputs{};
+    inputs.permit = true;
+    inputs.input_usable = false;
+    (void)machine.step(inputs);
+    // После входа в Stopping ненулевых уставок нет.
+    CHECK(!machine.step(inputs).allow_nonzero);
+}
+
 }  // namespace
 
 int main()
@@ -274,5 +341,8 @@ int main()
     handoverPath();
     handoverRejectedReturnsToNeutral();
     shutdownFromAnyPhase();
+    calibrationSourceBranches();
+    joystickHealthyDoesNotMaskCalibrationFailure();
+    activeWithoutUsableInputHasNoNonzero();
     return TEST_RESULT();
 }

@@ -41,6 +41,11 @@ public:
     bool energize(motion::AxisId id);
     bool setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy);
 
+    /// Последняя принятая политика удержания. Читает и пишет управляющая
+    /// задача; политика нужна для сохранения исходного значения при
+    /// временном удержании опорной точки.
+    motion::HoldPolicy holdPolicy(motion::AxisId id) const;
+
     motion::AxisStatus status(motion::AxisId id) const;
 
     /// Диагностика канала приоритетного останова по обеим осям.
@@ -57,6 +62,7 @@ private:
 
     motion::MotionController motion_{};
     std::array<AxisMotor, kAxisCount> motors_{};
+    std::array<motion::HoldPolicy, kAxisCount> hold_policy_{};
     State state_ = State::Idle;
 };
 

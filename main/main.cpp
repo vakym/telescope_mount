@@ -11,6 +11,7 @@
 #include <cstdint>
 
 #include "board/board.hpp"
+#include "calibration_hal/calibration_service.hpp"
 #include "control/joy_mapping.hpp"
 #include "control_hal/control_service.hpp"
 #include "esp_chip_info.h"
@@ -573,7 +574,10 @@ extern "C" void app_main(void)
     }
 
     control_hal::ControlService control(service, joystick, hub);
-    if (joystick_err == ESP_OK) {
+    // Управляющая задача и арбитраж должны существовать и при недоступном
+    // джойстике: иначе калибровка не сможет получить владение. Путь
+    // джойстика при этом остаётся invalid, движение от него невозможно.
+    {
         const esp_err_t control_err = control.start(makeJoyMapping());
         if (control_err != ESP_OK) {
             ESP_LOGE(kTag, "control unavailable: %s",
@@ -588,12 +592,21 @@ extern "C" void app_main(void)
         }
     }
 
+    // Сервис калибровки: загрузка NVS и задача. Создаётся статически, чтобы не
+    // увеличивать кадр стека main; NVS инициализирован точкой доступа выше.
+    static calibration_hal::CalibrationService calibration(control, hub);
+    const esp_err_t calibration_err = calibration.start();
+    if (calibration_err != ESP_OK) {
+        ESP_LOGE(kTag, "calibration unavailable: %s",
+                 esp_err_to_name(calibration_err));
+    }
+
 #if CONFIG_WEB_ENABLED
-    // Локальная страница состояния: только чтение хаба и подтверждённого
-    // состояния радио. Объект статический, как access_point и hub, поэтому
-    // кадр стека main не растёт. Ожидания Wi-Fi здесь нет: супервизор
-    // поднимает сервер после подтверждённого AP_START.
-    static web_hal::HttpStatusService web(hub, access_point);
+    // Локальная страница состояния: только чтение хаба, подтверждённого
+    // состояния радио и команд калибровки через сервис. Объект статический,
+    // как access_point и hub, поэтому кадр стека main не растёт. Ожидания
+    // Wi-Fi здесь нет: супервизор поднимает сервер после AP_START.
+    static web_hal::HttpStatusService web(hub, access_point, calibration);
     const esp_err_t web_err = web.start();
     if (web_err != ESP_OK) {
         ESP_LOGE(kTag, "web status page unavailable: %s",
