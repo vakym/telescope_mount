@@ -46,9 +46,10 @@ control::Delivery MotorAxisPort::resetFault(motion::AxisId id)
     return convert(motors_.resetFault(id));
 }
 
-bool MotorAxisPort::setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
+control::Delivery MotorAxisPort::setHoldPolicy(motion::AxisId id,
+                                               const motion::HoldPolicy &policy)
 {
-    return motors_.setHoldPolicy(id, policy);
+    return convert(motors_.setHoldPolicyCommand(id, policy));
 }
 
 motion::HoldPolicy MotorAxisPort::holdPolicy(motion::AxisId id) const

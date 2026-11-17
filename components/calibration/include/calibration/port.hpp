@@ -63,8 +63,10 @@ public:
     virtual bool beginHold(motion::AxisId axis, std::uint32_t session,
                            Micros absolute_deadline_us) = 0;
     virtual bool endHold(motion::AxisId axis, std::uint32_t session) = 0;
-    /// Применено ли временное удержание этой сессии (подтверждение снятия).
+    /// Применено ли временное удержание этой сессии.
     virtual bool holdActive(motion::AxisId axis, std::uint32_t session) const = 0;
+    /// Снято ли удержание и ПРИМЕНЕНО ли восстановление исходной политики.
+    virtual bool holdCleared(motion::AxisId axis) const = 0;
     virtual bool setRate(std::uint32_t session, motion::AxisId axis, float rate,
                          Micros lease_us) = 0;
     virtual bool requestStop(std::uint64_t request_id) = 0;

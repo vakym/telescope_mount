@@ -179,6 +179,24 @@ int main()
     CHECK(retry.apply(false) == ApplyResult::Ok);
     CHECK(retry.state() == SessionState::Applying);
 
+    // Удаление перенумеровывает записи: показанный номер == индекс.
+    Session renumber;
+    CHECK(renumber.start(config(), params()));
+    CHECK(renumber.ownerReady());
+    passStart(renumber, 0, 1);
+    CHECK(renumber.requestStop());
+    CHECK(renumber.confirmStop(attestation(4096, 2), 1, true));
+    CHECK(renumber.confirmEnd());
+    CHECK(renumber.confirmStart());
+    CHECK(renumber.requestStop());
+    CHECK(renumber.confirmStop(attestation(8192, 3), 1, true));
+    CHECK(renumber.confirmEnd());
+    CHECK(renumber.state() == SessionState::Review);
+    CHECK(renumber.measurementCount() == 2);
+    CHECK(renumber.deleteMeasurement(0));
+    CHECK(renumber.measurementCount() == 1);
+    CHECK(renumber.measurements()[0].index == 0U);
+
     // Эпоха исполнителя не должна меняться между опорными точками.
     Session epoch;
     CHECK(epoch.start(config(), params()));

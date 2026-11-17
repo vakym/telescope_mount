@@ -27,13 +27,13 @@ public:
     virtual Delivery resetFault(motion::AxisId id) = 0;
 
     /// Временная политика удержания опорной точки (калибровка).
-    /// По умолчанию не поддерживается: тестовые порты не обязаны её
-    /// реализовывать, а вызывающий обязан проверить false.
-    virtual bool setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
+    /// Возвращает тикет, чтобы вызывающий мог подтвердить ПРИМЕНЕНИЕ
+    /// политики, а не только приём в очередь. По умолчанию не поддерживается.
+    virtual Delivery setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
     {
         (void)id;
         (void)policy;
-        return false;
+        return Delivery{};
     }
 
     /// Текущая политика удержания оси (для сохранения и восстановления).

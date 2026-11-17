@@ -40,6 +40,8 @@ public:
     bool release(motion::AxisId id);
     bool energize(motion::AxisId id);
     bool setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy);
+    /// То же, но с тикетом: позволяет подтвердить фактическое применение.
+    CommandReceipt setHoldPolicyCommand(motion::AxisId id, const motion::HoldPolicy &policy);
 
     /// Последняя принятая политика удержания. Читает и пишет управляющая
     /// задача; политика нужна для сохранения исходного значения при

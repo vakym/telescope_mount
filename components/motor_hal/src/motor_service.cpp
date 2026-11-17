@@ -155,17 +155,21 @@ bool MotorService::energize(motion::AxisId id)
 
 bool MotorService::setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy)
 {
+    return setHoldPolicyCommand(id, policy).accepted;
+}
+
+CommandReceipt MotorService::setHoldPolicyCommand(motion::AxisId id,
+                                                  const motion::HoldPolicy &policy)
+{
     if (!valid(id)) {
-        return false;
+        return CommandReceipt{};
     }
-    const bool accepted =
-        motors_[static_cast<std::size_t>(id)]
-            .post(motion::AxisCommand::setHoldPolicy(policy))
-            .accepted;
-    if (accepted) {
+    const CommandReceipt receipt =
+        motors_[static_cast<std::size_t>(id)].post(motion::AxisCommand::setHoldPolicy(policy));
+    if (receipt.accepted) {
         hold_policy_[static_cast<std::size_t>(id)] = policy;
     }
-    return accepted;
+    return receipt;
 }
 
 motion::HoldPolicy MotorService::holdPolicy(motion::AxisId id) const

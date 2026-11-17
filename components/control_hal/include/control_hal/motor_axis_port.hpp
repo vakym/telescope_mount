@@ -23,7 +23,7 @@ public:
     control::Delivery stopImmediate(motion::AxisId id) override;
     control::Delivery resetFault(motion::AxisId id) override;
 
-    bool setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy) override;
+    control::Delivery setHoldPolicy(motion::AxisId id, const motion::HoldPolicy &policy) override;
     motion::HoldPolicy holdPolicy(motion::AxisId id) const override;
 
     motion::AxisStatus status(motion::AxisId id) const override;

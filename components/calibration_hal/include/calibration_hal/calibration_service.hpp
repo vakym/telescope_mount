@@ -170,6 +170,8 @@ private:
     motion::Direction move_direction_ = motion::Direction::Forward;
     calibration::Micros move_until_us_ = 0;
     calibration::Micros measure_started_us_ = 0;
+    /// Начало текущего непрерывного удержания кнопки (не всего измерения).
+    calibration::Micros continuous_move_started_us_ = 0;
 
     std::uint32_t reference_epoch_ = 0;
     bool stop_pending_ = false;

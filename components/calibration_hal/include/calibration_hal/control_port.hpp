@@ -28,6 +28,7 @@ public:
                    calibration::Micros absolute_deadline_us) override;
     bool endHold(motion::AxisId axis, std::uint32_t session) override;
     bool holdActive(motion::AxisId axis, std::uint32_t session) const override;
+    bool holdCleared(motion::AxisId axis) const override;
     bool setRate(std::uint32_t session, motion::AxisId axis, float rate,
                  calibration::Micros lease_us) override;
     bool requestStop(std::uint64_t request_id) override;

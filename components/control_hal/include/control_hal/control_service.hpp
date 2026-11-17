@@ -126,6 +126,8 @@ public:
                                    state::Micros absolute_deadline_us);
     esp_err_t endCalibrationHold(motion::AxisId axis, std::uint32_t session);
     bool calibrationHoldActive(motion::AxisId axis, std::uint32_t session) const;
+    /// true только когда удержания нет и восстановление политики применено.
+    bool calibrationHoldCleared(motion::AxisId axis) const;
 
     /// Текущая (возможно временная) политика удержания оси.
     motion::HoldPolicy holdPolicy(motion::AxisId axis) const;
@@ -184,9 +186,12 @@ private:
     /// Защищено cal_mutex_.
     struct CalibrationHold {
         bool active = false;
+        /// Восстановление исходной политики отправлено, но ещё не применено.
+        bool restore_pending = false;
         std::uint32_t session = 0;
         motion::HoldPolicy original{};
         state::Micros deadline = 0;
+        control::CommandTicket restore_ticket{};
     };
 
     static void taskEntry(void *arg);

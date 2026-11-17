@@ -100,6 +100,11 @@ bool ControlPort::holdActive(motion::AxisId axis, std::uint32_t session) const
     return control_.calibrationHoldActive(axis, session);
 }
 
+bool ControlPort::holdCleared(motion::AxisId axis) const
+{
+    return control_.calibrationHoldCleared(axis);
+}
+
 bool ControlPort::submitRates(std::uint32_t session, motion::AxisId axis, float rate,
                               calibration::Micros lease_us)
 {

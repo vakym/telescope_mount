@@ -263,6 +263,11 @@ bool Session::deleteMeasurement(std::size_t index) noexcept
     }
     --measurement_count_;
     measurements_[measurement_count_] = Measurement{};
+    // Номера записей совпадают с текущими индексами массива: иначе
+    // отображаемый номер и индекс удаления расходятся.
+    for (std::size_t i = 0; i < measurement_count_; ++i) {
+        measurements_[i].index = static_cast<std::uint32_t>(i);
+    }
     recompute();
     bumpRevision();
     return true;

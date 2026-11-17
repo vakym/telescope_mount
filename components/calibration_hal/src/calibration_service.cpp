@@ -23,6 +23,9 @@ constexpr std::uint32_t kTaskStackBytes = 5120;
 constexpr UBaseType_t kTaskPriority = 5;
 constexpr calibration::Micros kStopConfirmTimeoutUs = 3'000'000;
 constexpr calibration::Micros kReleaseConfirmUs = 300'000;
+/// Минимальный срок ненулевой уставки: меньше — считаем, что разрешение
+/// закончилось, и обрабатываем это как истечение.
+constexpr calibration::Micros kMinMoveLeaseUs = 50'000;
 constexpr calibration::Micros kFlashWindowTimeoutUs = 5'000'000;
 constexpr calibration::Micros kReadinessLossMarginUs = 1'500'000;
 constexpr calibration::Micros kClaimRetryUs = 250'000;
@@ -338,6 +341,10 @@ CommandOutcome CalibrationService::move(std::uint32_t session, std::uint64_t tok
         unlock();
         return CommandOutcome::InvalidState;
     }
+    if (!move_active_) {
+        // Новое непрерывное удержание кнопки: свой таймер, не от confirmStart.
+        continuous_move_started_us_ = port_.nowUs();
+    }
     move_active_ = true;
     move_rate_ = rate;
     move_direction_ = direction;
@@ -358,6 +365,15 @@ bool CalibrationService::requestStopInternal(calibration::Micros now)
     stop_requested_us_ = now;
     stop_pending_ = true;
     move_active_ = false;
+    continuous_move_started_us_ = 0;
+    // Штатный останов не должен терять владение из-за остатка короткого
+    // lease движения: немедленно обновляем слот нулевой уставкой с полным
+    // сроком пригодности источника.
+    if (ownership_claimed_ && session_id_ != 0U) {
+        (void)port_.setRate(session_id_, session_.config().axis, 0.0F,
+                            static_cast<calibration::Micros>(CONFIG_CAL_READINESS_LEASE_MS) *
+                                1000ULL);
+    }
     return port_.requestStop(stop_request_id_);
 }
 
@@ -760,12 +776,15 @@ void CalibrationService::validateMeasurement(calibration::Micros now,
 
 bool CalibrationService::handleMoveLease(calibration::Micros now)
 {
-    if (!move_active_ || now <= move_until_us_) {
+    // Разрешение действительно только при now < move_until_us_: ровно в
+    // дедлайн оно уже истекло (та же граница, что в permittedOutputRate).
+    if (!move_active_ || now < move_until_us_) {
         return false;
     }
     // Браузер перестал продлевать разрешение: это не штатный останов.
     // Текущее измерение аннулируется, ось останавливается.
     move_active_ = false;
+    continuous_move_started_us_ = 0;
     const calibration::SessionState state = session_.state();
     if (state == calibration::SessionState::Measuring) {
         (void)session_.abandon();
@@ -775,6 +794,11 @@ bool CalibrationService::handleMoveLease(calibration::Micros now)
         state == calibration::SessionState::EndReady) {
         if (session_.requestStop()) {
             (void)requestStopInternal(now);
+        } else if (ownership_claimed_ && session_id_ != 0U) {
+            // Владение сохраняется: обновляем слот нулевой уставкой.
+            (void)port_.setRate(session_id_, session_.config().axis, 0.0F,
+                                static_cast<calibration::Micros>(CONFIG_CAL_READINESS_LEASE_MS) *
+                                    1000ULL);
         }
     }
     return true;
@@ -875,6 +899,7 @@ void CalibrationService::driveMove(calibration::Micros now,
     if (state == calibration::SessionState::StartReady) {
         // Движение с подтверждённой стартовой точки аннулирует attestation.
         move_active_ = false;
+        continuous_move_started_us_ = 0;
         return;
     }
     // Знак задаётся направлением, модуль — клиентом. Срок уставки не
@@ -884,16 +909,21 @@ void CalibrationService::driveMove(calibration::Micros now,
         move_active_ = false;
         return;
     }
+    const calibration::Micros remaining = move_until_us_ - now;
+    if (remaining < kMinMoveLeaseUs) {
+        // Слишком короткий остаток не публикуем: обрабатываем как истечение.
+        (void)handleMoveLease(now);
+        return;
+    }
     calibration::Micros lease_us =
         static_cast<calibration::Micros>(CONFIG_CAL_MOVE_LEASE_MS) * 1000ULL;
-    const calibration::Micros remaining = move_until_us_ - now;
     if (remaining < lease_us) {
         lease_us = remaining;
     }
     (void)port_.setRate(session_id_, session_.config().axis, rate, lease_us);
     if (state == calibration::SessionState::Measuring &&
-        measure_started_us_ != 0 &&
-        now - measure_started_us_ >
+        continuous_move_started_us_ != 0 &&
+        now - continuous_move_started_us_ >
             static_cast<calibration::Micros>(CONFIG_CAL_MAX_CONTINUOUS_MOVE_MS) * 1000ULL) {
         // Предел одного непрерывного движения: принудительный останов.
         if (session_.requestStop()) {

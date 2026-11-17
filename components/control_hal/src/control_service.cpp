@@ -266,6 +266,19 @@ bool ControlService::calibrationHoldActive(motion::AxisId axis, std::uint32_t se
     return active;
 }
 
+bool ControlService::calibrationHoldCleared(motion::AxisId axis) const
+{
+    const std::size_t index = indexOf(axis);
+    if (index >= 2 || !lockCal(10)) {
+        // Ошибка чтения не выдаётся за подтверждённое освобождение.
+        return false;
+    }
+    const CalibrationHold &hold = calibration_hold_[index];
+    const bool cleared = !hold.active && !hold.restore_pending;
+    unlockCal();
+    return cleared;
+}
+
 motion::HoldPolicy ControlService::holdPolicy(motion::AxisId axis) const
 {
     return port_.holdPolicy(axis);
@@ -1273,6 +1286,8 @@ void ControlService::applyCalibrationRequests(Micros now)
             if (!hold.active) {
                 // Исходная политика берётся из конфигурации, а не угадывается.
                 hold.original = port_.holdPolicy(id);
+                hold.restore_pending = false;
+                hold.restore_ticket = control::CommandTicket{};
                 hold.active = true;
                 hold.session = request.session;
                 hold.deadline = request.deadline;
@@ -1294,10 +1309,14 @@ void ControlService::applyCalibrationRequests(Micros now)
                        (hold.deadline == 0U || request.deadline < hold.deadline)) {
                 hold.deadline = request.deadline;  // не расширяем
             }
-        } else if (hold.active && hold.session == request.session) {
+        } else if (hold.session == request.session && (hold.active || hold.restore_pending)) {
             // Идемпотентно: восстанавливаем сохранённую исходную политику.
-            if (port_.setHoldPolicy(id, hold.original)) {
-                hold = CalibrationHold{};
+            // Подтверждение — по применённому тикету, а не по приёму в очередь.
+            const control::Delivery delivery = port_.setHoldPolicy(id, hold.original);
+            if (delivery.accepted && delivery.ticket.valid()) {
+                hold.active = false;
+                hold.restore_pending = true;
+                hold.restore_ticket = delivery.ticket;
             }
         }
     }
@@ -1324,13 +1343,28 @@ void ControlService::applyCalibrationRequests(Micros now)
         if (!may_restore) {
             continue;
         }
-        if (!port_.setHoldPolicy(id, hold.original)) {
+        const control::Delivery delivery = port_.setHoldPolicy(id, hold.original);
+        if (!delivery.accepted || !delivery.ticket.valid()) {
             continue;
         }
-        hold = CalibrationHold{};
+        hold.active = false;
+        hold.restore_pending = true;
+        hold.restore_ticket = delivery.ticket;
         if (deadline_hit) {
             revokeMotionPermission();
             safety_stop_requested_.store(true);
+        }
+    }
+
+    // 3. Подтверждение восстановления исходной политики: тикет применён.
+    for (std::size_t i = 0; i < 2; ++i) {
+        CalibrationHold &hold = calibration_hold_[i];
+        if (hold.active || !hold.restore_pending) {
+            continue;
+        }
+        if (axis_[i].last_applied_command_id == hold.restore_ticket.id &&
+            axis_[i].command_epoch == hold.restore_ticket.epoch) {
+            hold = CalibrationHold{};
         }
     }
 
