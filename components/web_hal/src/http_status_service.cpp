@@ -672,8 +672,9 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
         httpd_resp_set_type(req, kJsonContentType);
         return httpd_resp_send(req, kBadMediaTypeBody, HTTPD_RESP_USE_STRLEN);
     }
-    if (req->content_len < 0 ||
-        static_cast<std::size_t>(req->content_len) > kMaxCommandBodyBytes) {
+    // content_len в ESP-IDF беззнаковый: проверяется только верхняя граница.
+    const std::size_t total = static_cast<std::size_t>(req->content_len);
+    if (total > kMaxCommandBodyBytes) {
         httpd_resp_set_status(req, "413 Payload Too Large");
         httpd_resp_set_type(req, kJsonContentType);
         return httpd_resp_send(req, kTooLargeBody, HTTPD_RESP_USE_STRLEN);
@@ -681,7 +682,6 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
 
     char body[kMaxCommandBodyBytes + 1];
     std::size_t received = 0;
-    const std::size_t total = static_cast<std::size_t>(req->content_len);
     while (received < total) {
         const int ret = httpd_req_recv(req, body + received, total - received);
         if (ret == HTTPD_SOCK_ERR_TIMEOUT) {
