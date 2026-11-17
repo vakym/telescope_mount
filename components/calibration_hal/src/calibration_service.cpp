@@ -774,15 +774,13 @@ void CalibrationService::validateMeasurement(calibration::Micros now,
     }
 }
 
-bool CalibrationService::handleMoveLease(calibration::Micros now)
+void CalibrationService::revokeBrowserMotion(calibration::Micros now)
 {
-    // Разрешение действительно только при now < move_until_us_: ровно в
-    // дедлайн оно уже истекло (та же граница, что в permittedOutputRate).
-    if (!move_active_ || now < move_until_us_) {
-        return false;
+    if (!move_active_) {
+        return;
     }
-    // Браузер перестал продлевать разрешение: это не штатный останов.
-    // Текущее измерение аннулируется, ось останавливается.
+    // Браузер перестал продлевать разрешение или оно отозвано досрочно:
+    // текущее измерение аннулируется, ось останавливается.
     move_active_ = false;
     continuous_move_started_us_ = 0;
     const calibration::SessionState state = session_.state();
@@ -801,12 +799,22 @@ bool CalibrationService::handleMoveLease(calibration::Micros now)
                                     1000ULL);
         }
     }
+}
+
+bool CalibrationService::handleMoveLease(calibration::Micros now)
+{
+    // Разрешение действует, только пока остаток не меньше минимального
+    // срока уставки: иначе короткий lease мог бы уничтожить владение.
+    if (!move_active_ || now + kMinMoveLeaseUs <= move_until_us_) {
+        return false;
+    }
+    revokeBrowserMotion(now);
     return true;
 }
 
 float CalibrationService::permittedOutputRate(calibration::Micros now) const noexcept
 {
-    if (!move_active_ || now >= move_until_us_) {
+    if (!move_active_ || move_until_us_ <= now + kMinMoveLeaseUs) {
         return 0.0F;
     }
     return calibration::signedRate(move_direction_, move_rate_);
@@ -911,8 +919,8 @@ void CalibrationService::driveMove(calibration::Micros now,
     }
     const calibration::Micros remaining = move_until_us_ - now;
     if (remaining < kMinMoveLeaseUs) {
-        // Слишком короткий остаток не публикуем: обрабатываем как истечение.
-        (void)handleMoveLease(now);
+        // Слишком короткий остаток не публикуем: разрешение отозвано.
+        revokeBrowserMotion(now);
         return;
     }
     calibration::Micros lease_us =
@@ -1029,7 +1037,7 @@ bool CalibrationService::releaseSession(calibration::Micros now)
     const calibration::Micros deadline = now + kReleaseConfirmUs;
     for (;;) {
         const bool hold_clear =
-            !hold_started_ || !port_.holdActive(session_.config().axis, session_id_);
+            !hold_started_ || port_.holdCleared(session_.config().axis);
         const bool owner_clear = !ownership_claimed_ ||
                                  port_.snapshot().owner != state::SourceId::Calibration;
         if (hold_clear && owner_clear) {

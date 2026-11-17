@@ -550,6 +550,7 @@ void AxisPlanner::updateState(float rate_before, float rate_after) noexcept
 void AxisPlanner::updateStatus() noexcept
 {
     status_.state = state_;
+    status_.hold = config_.hold;
     status_.position_step = position_;
     status_.rate_steps_s = dir_ == Direction::Forward ? v_ : -v_;
     status_.target_rate_steps_s = target_rate_;

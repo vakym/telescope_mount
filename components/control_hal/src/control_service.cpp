@@ -1281,13 +1281,17 @@ void ControlService::applyCalibrationRequests(Micros now)
             continue;
         }
         const motion::AxisId id = static_cast<motion::AxisId>(i);
+        // Все изменения общего состояния удержания выполняются под тем же
+        // мьютексом, что и чтение. Порт вызывается коротко.
+        if (!lockCal(portMAX_DELAY)) {
+            continue;
+        }
         CalibrationHold &hold = calibration_hold_[i];
         if (request.begin) {
             if (!hold.active) {
                 // Исходная политика берётся из конфигурации, а не угадывается.
                 hold.original = port_.holdPolicy(id);
                 hold.restore_pending = false;
-                hold.restore_ticket = control::CommandTicket{};
                 hold.active = true;
                 hold.session = request.session;
                 hold.deadline = request.deadline;
@@ -1311,14 +1315,13 @@ void ControlService::applyCalibrationRequests(Micros now)
             }
         } else if (hold.session == request.session && (hold.active || hold.restore_pending)) {
             // Идемпотентно: восстанавливаем сохранённую исходную политику.
-            // Подтверждение — по применённому тикету, а не по приёму в очередь.
             const control::Delivery delivery = port_.setHoldPolicy(id, hold.original);
-            if (delivery.accepted && delivery.ticket.valid()) {
+            if (delivery.accepted) {
                 hold.active = false;
                 hold.restore_pending = true;
-                hold.restore_ticket = delivery.ticket;
             }
         }
+        unlockCal();
     }
 
     const state::SourceId owner = arbiter_.owner();
@@ -1329,43 +1332,52 @@ void ControlService::applyCalibrationRequests(Micros now)
     const bool readiness_lost = calibration_ready_seen_ && !ready;
 
     // 2. Абсолютный предел удержания и потеря пригодности источника.
-    for (std::size_t i = 0; i < 2; ++i) {
-        CalibrationHold &hold = calibration_hold_[i];
-        if (!hold.active) {
-            continue;
+    // Изменения общего состояния — под cal_mutex_; ревокация (атомики и
+    // флаг безопасности) выполняется после освобождения мьютекса.
+    bool revoke_due_to_deadline = false;
+    if (lockCal(portMAX_DELAY)) {
+        for (std::size_t i = 0; i < 2; ++i) {
+            CalibrationHold &hold = calibration_hold_[i];
+            if (!hold.active) {
+                continue;
+            }
+            const motion::AxisId id = static_cast<motion::AxisId>(i);
+            const bool deadline_hit = hold.deadline != 0U && now >= hold.deadline;
+            const bool may_restore =
+                deadline_hit ||
+                (readiness_lost && (stop_protocol_.confirmed() ||
+                                    control::StopProtocol::axisAtRest(axis_[i])));
+            if (!may_restore) {
+                continue;
+            }
+            const control::Delivery delivery = port_.setHoldPolicy(id, hold.original);
+            if (!delivery.accepted) {
+                continue;
+            }
+            hold.active = false;
+            hold.restore_pending = true;
+            revoke_due_to_deadline = revoke_due_to_deadline || deadline_hit;
         }
-        const motion::AxisId id = static_cast<motion::AxisId>(i);
-        const bool deadline_hit = hold.deadline != 0U && now >= hold.deadline;
-        const bool may_restore =
-            deadline_hit ||
-            (readiness_lost && (stop_protocol_.confirmed() ||
-                                control::StopProtocol::axisAtRest(axis_[i])));
-        if (!may_restore) {
-            continue;
-        }
-        const control::Delivery delivery = port_.setHoldPolicy(id, hold.original);
-        if (!delivery.accepted || !delivery.ticket.valid()) {
-            continue;
-        }
-        hold.active = false;
-        hold.restore_pending = true;
-        hold.restore_ticket = delivery.ticket;
-        if (deadline_hit) {
-            revokeMotionPermission();
-            safety_stop_requested_.store(true);
-        }
-    }
 
-    // 3. Подтверждение восстановления исходной политики: тикет применён.
-    for (std::size_t i = 0; i < 2; ++i) {
-        CalibrationHold &hold = calibration_hold_[i];
-        if (hold.active || !hold.restore_pending) {
-            continue;
+        // 3. Подтверждение восстановления исходной политики по фактически
+        // действующей политике оси, а не по последнему применённому id:
+        // исполнитель мог обработать несколько команд до опроса.
+        for (std::size_t i = 0; i < 2; ++i) {
+            CalibrationHold &hold = calibration_hold_[i];
+            if (hold.active || !hold.restore_pending) {
+                continue;
+            }
+            const motion::HoldPolicy &effective = axis_[i].hold;
+            if (effective.hold_enabled == hold.original.hold_enabled &&
+                effective.hold_timeout_ms == hold.original.hold_timeout_ms) {
+                hold = CalibrationHold{};
+            }
         }
-        if (axis_[i].last_applied_command_id == hold.restore_ticket.id &&
-            axis_[i].command_epoch == hold.restore_ticket.epoch) {
-            hold = CalibrationHold{};
-        }
+        unlockCal();
+    }
+    if (revoke_due_to_deadline) {
+        revokeMotionPermission();
+        safety_stop_requested_.store(true);
     }
 
     if (readiness_lost && calibration_permission_active_) {

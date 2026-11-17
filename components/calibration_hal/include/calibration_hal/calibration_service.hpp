@@ -130,6 +130,9 @@ private:
     void superviseStop(calibration::Micros now, const calibration::Snapshot &snapshot);
     void superviseTimeouts(calibration::Micros now, const calibration::Snapshot &snapshot);
     bool releaseSession(calibration::Micros now);
+    /// Досрочный/естественный отзыв браузерного разрешения: аннулирование
+    /// текущего измерения и останов, если сессия ещё подвижна.
+    void revokeBrowserMotion(calibration::Micros now);
     bool handleMoveLease(calibration::Micros now);
     float permittedOutputRate(calibration::Micros now) const noexcept;
     /// 0 — ошибка записи, 1 — результат неизвестен, 2 — проверено.

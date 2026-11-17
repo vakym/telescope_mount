@@ -496,6 +496,15 @@ void holdPolicyDoesNotReplan()
 
     CHECK(rig.planner.planKey() == key);  // alarm не отменяется
     CHECK(rig.planner.hasPending());
+
+    // Статус несёт ФАКТИЧЕСКИ действующую политику: по ней управляющий слой
+    // подтверждает восстановление, не полагаясь на последний id команды.
+    CHECK(rig.planner.status().hold.hold_enabled);
+    CHECK(rig.planner.status().hold.hold_timeout_ms == 100U);
+
+    motion::HoldPolicy restored{};
+    CHECK(rig.planner.apply(AxisCommand::setHoldPolicy(restored)));
+    CHECK(!rig.planner.status().hold.hold_enabled);
 }
 
 void moveStepsZeroIsSmoothStop()

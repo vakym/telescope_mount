@@ -33,6 +33,8 @@ struct StepPlan {
 struct AxisStatus {
     AxisState state = AxisState::Disabled;
     std::int64_t position_step = 0;  ///< полушаги, меняется только на commitPending
+    /// Фактически действующая политика удержания (применена планировщиком).
+    HoldPolicy hold{};
     float rate_steps_s = 0.0F;
     float target_rate_steps_s = 0.0F;
     bool energized = false;      ///< заполняется исполнителем

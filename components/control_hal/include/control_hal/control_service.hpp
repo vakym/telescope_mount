@@ -191,7 +191,6 @@ private:
         std::uint32_t session = 0;
         motion::HoldPolicy original{};
         state::Micros deadline = 0;
-        control::CommandTicket restore_ticket{};
     };
 
     static void taskEntry(void *arg);
