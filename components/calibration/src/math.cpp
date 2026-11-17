@@ -1,6 +1,8 @@
 #include "calibration/math.hpp"
 
 #include <cmath>
+
+#include <cmath>
 #include <limits>
 
 namespace calibration {
@@ -201,6 +203,15 @@ std::int64_t toNanodegrees(double degrees_per_half_step) noexcept
         return std::numeric_limits<std::int64_t>::min();
     }
     return static_cast<std::int64_t>(value >= 0.0L ? value + 0.5L : value - 0.5L);
+}
+
+float signedRate(motion::Direction direction, float magnitude) noexcept
+{
+    if (!std::isfinite(magnitude)) {
+        return 0.0F;
+    }
+    const float absolute = std::fabs(magnitude);
+    return direction == motion::Direction::Forward ? absolute : -absolute;
 }
 
 }  // namespace calibration

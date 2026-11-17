@@ -103,7 +103,9 @@ bool ControlPort::submitRates(std::uint32_t session, motion::AxisId axis, float 
     intent.session = session;
     intent.sequence = ++sequence_;
     intent.created_us = nowUs();
-    intent.valid_until_us = intent.created_us + (lease_us == 0U ? 300'000U : lease_us);
+    // Срок уставки задаёт вызывающий: продлевать его за дедлайн разрешения
+    // браузера нельзя. Нулевой срок означает «до следующего цикла».
+    intent.valid_until_us = intent.created_us + (lease_us == 0U ? 1'000U : lease_us);
     intent.claim = true;
     const std::size_t index = static_cast<std::size_t>(axis);
     if (index >= 2) {
@@ -189,6 +191,7 @@ calibration::Snapshot ControlPort::snapshot() const
     }
     out.owner = status.owner;
     out.phase = status.phase;
+    out.permit = status.permit;
     out.owner_generation = status.owner_generation;
     out.motion_generation = control_.motionGeneration();
     out.input_ready = control_.calibrationInputReady();

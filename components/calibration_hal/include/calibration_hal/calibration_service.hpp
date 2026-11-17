@@ -42,6 +42,8 @@ enum class CommandOutcome : std::uint8_t {
     InvalidArgument,
     Busy,
     StaleSession,
+    /// Токен не совпадает с владельцем сессии (наблюдатель не управляет).
+    Forbidden,
 };
 
 /// Статус постоянного коэффициента оси.
@@ -63,6 +65,7 @@ struct CalibrationStatus {
     std::uint32_t revolutions = 0;
     std::uint32_t repeats = 0;
     std::uint32_t measurement_count = 0;
+    calibration::Measurement measurements[calibration::kMaxMeasurements]{};
     calibration::CombinedResult result{};
     bool mark_recheck_required = false;
     bool hold_active = false;
@@ -86,20 +89,26 @@ public:
     CalibrationStatus status() const;
     AxisScaleStatus axisScale(motion::AxisId axis) const;
 
-    // Команды сессии. session_id обязателен; 0 — только для создания.
-    CommandOutcome createSession(const SessionRequest &request, std::uint32_t &session_id);
-    CommandOutcome closeSession(std::uint32_t session_id);
-    CommandOutcome move(std::uint32_t session_id, motion::Direction direction, float rate,
+    // Команды сессии. session_id и token обязательны: токен выдаётся один раз
+    // при создании и не публикуется в общем статусе.
+    CommandOutcome createSession(const SessionRequest &request, std::uint32_t &session_id,
+                                 std::uint32_t &token);
+    CommandOutcome closeSession(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome move(std::uint32_t session_id, std::uint32_t token,
+                        motion::Direction direction, float rate,
                         std::uint32_t expected_motion_generation);
-    CommandOutcome stop(std::uint32_t session_id);
-    CommandOutcome confirmStart(std::uint32_t session_id);
-    CommandOutcome confirmEnd(std::uint32_t session_id);
-    CommandOutcome resume(std::uint32_t session_id);
-    CommandOutcome abandon(std::uint32_t session_id);
-    CommandOutcome deleteMeasurement(std::uint32_t session_id, std::size_t index);
-    CommandOutcome addRepeat(std::uint32_t session_id);
-    CommandOutcome apply(std::uint32_t session_id, bool acknowledge_low_repeatability);
-    CommandOutcome resetAxis(motion::AxisId axis);
+    CommandOutcome stop(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome confirmStart(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome confirmEnd(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome resume(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome abandon(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome deleteMeasurement(std::uint32_t session_id, std::uint32_t token,
+                                     std::size_t index);
+    CommandOutcome addRepeat(std::uint32_t session_id, std::uint32_t token);
+    CommandOutcome apply(std::uint32_t session_id, std::uint32_t token,
+                         bool acknowledge_low_repeatability);
+    /// Сброс необратим: требует явного подтверждения в теле.
+    CommandOutcome resetAxis(motion::AxisId axis, bool confirmed);
 
 private:
     static void taskEntry(void *arg);
@@ -108,6 +117,10 @@ private:
     bool lock(TickType_t wait = portMAX_DELAY) const;
     void unlock() const;
 
+    bool tokenValid(std::uint32_t token) const noexcept;
+    void finishSessionLocked(calibration::Micros now);
+    bool liveReferenceValid(const calibration::Snapshot &snapshot) const noexcept;
+    void validateMeasurement(calibration::Micros now, const calibration::Snapshot &snapshot);
     void stepPreparing(calibration::Micros now, const calibration::Snapshot &snapshot);
     void stepActive(calibration::Micros now, const calibration::Snapshot &snapshot);
     void refreshReadiness(calibration::Micros now);
@@ -138,7 +151,9 @@ private:
     AxisScaleStatus scales_[2]{};
 
     std::uint32_t session_id_ = 0;
+    std::uint32_t session_token_ = 0;
     std::uint32_t next_session_id_ = 1;
+    std::uint32_t token_counter_ = 0;
     std::uint64_t next_stop_request_ = 1;
 
     bool ownership_claimed_ = false;
@@ -153,6 +168,7 @@ private:
     calibration::Micros move_until_us_ = 0;
     calibration::Micros measure_started_us_ = 0;
 
+    std::uint32_t reference_epoch_ = 0;
     bool stop_pending_ = false;
     std::uint64_t stop_request_id_ = 0;
     calibration::Micros stop_requested_us_ = 0;

@@ -234,6 +234,48 @@ CalibrationJsonResult calibrationStatusJson(const CalibrationView &view, char *o
     writeScale(writer, motion::AxisId::Altitude, view.scale[1],
                view.nominal_half_steps_per_revolution[1]);
     writer.append(']');
+    writer.append(',');
+    writer.key("measurements");
+    writer.append('[');
+    const std::uint32_t count = view.measurements == nullptr
+                                    ? 0U
+                                    : (view.measurement_count < calibration::kMaxMeasurements
+                                           ? view.measurement_count
+                                           : static_cast<std::uint32_t>(
+                                                 calibration::kMaxMeasurements));
+    for (std::uint32_t i = 0; i < count; ++i) {
+        if (i > 0U) {
+            writer.append(',');
+        }
+        const calibration::Measurement &m = view.measurements[i];
+        writer.append('{');
+        writer.key("index");
+        writer.number(m.index);
+        writer.append(',');
+        writer.key("revolutions");
+        writer.number(m.revolutions);
+        writer.append(',');
+        writer.key("delta_half_steps");
+        writer.number(m.delta_half_steps);
+        writer.append(',');
+        writer.key("degrees_per_half_step");
+        writer.decimal(m.degrees_per_half_step, 9);
+        writer.append(',');
+        writer.key("deviation_ppm");
+        writer.number(m.deviation_ppm < 0
+                          ? 0
+                          : static_cast<std::uint64_t>(m.deviation_ppm));
+        writer.append(',');
+        writer.key("valid");
+        writer.append(m.valid ? "true" : "false");
+        writer.append(',');
+        writer.key("reason");
+        writer.append('"');
+        writer.append(calibration::invalidReasonName(m.reason));
+        writer.append('"');
+        writer.append('}');
+    }
+    writer.append(']');
     writer.append('}');
 
     if (writer.overflow) {

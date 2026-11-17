@@ -47,6 +47,10 @@ CombinedResult combine(const Measurement *measurements, std::size_t count,
 /// Номинальный коэффициент из числа полушагов на оборот.
 double nominalDegreesPerHalfStep(std::uint32_t half_steps_per_revolution) noexcept;
 
+/// Знаковая исполнительная уставка из направления и положительного модуля.
+/// Направление — единственный источник знака: клиент передаёт модуль.
+float signedRate(motion::Direction direction, float magnitude) noexcept;
+
 /// Перевод коэффициента в наноградусы на полушаг с округлением.
 std::int64_t toNanodegrees(double degrees_per_half_step) noexcept;
 

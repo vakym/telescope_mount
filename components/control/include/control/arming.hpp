@@ -42,6 +42,8 @@ struct ArmingInputs {
     bool enable_failed = false;      ///< доставка Enable исчерпала попытки
     bool rate_delivery_failed = false;
     bool stop_requested = false;  ///< safety stop или shutdown
+    /// Штатный останов калибровки: не отзывает владение и не снимает permit.
+    bool calibration_stop = false;
     bool stopped_confirmed = false;
     bool stop_escalate = false;
     bool stop_failed = false;

@@ -66,12 +66,25 @@ bool Session::noteMove(motion::Direction direction, std::uint32_t generation) no
             bumpRevision();
             return true;
         case SessionState::Measuring:
-        case SessionState::EndReady:
             if (direction != config_.direction) {
                 fail(SessionError::DirectionViolation);
                 last_invalid_ = InvalidReason::Reversal;
                 return false;
             }
+            return true;
+        case SessionState::EndReady:
+            // Доводка после конечного останова: старая конечная точка
+            // аннулируется, подтверждение снова требует нового останова.
+            if (direction != config_.direction) {
+                fail(SessionError::DirectionViolation);
+                last_invalid_ = InvalidReason::Reversal;
+                return false;
+            }
+            current_end_ = ReferenceAttestation{};
+            state_ = SessionState::Measuring;
+            hold_active_ = true;
+            mark_recheck_required_ = false;
+            bumpRevision();
             return true;
         default:
             return false;
@@ -116,8 +129,14 @@ bool Session::confirmStop(const ReferenceAttestation &attestation,
         state_ != SessionState::AwaitingEndStop) {
         return false;
     }
-    if (!canConfirmReference(attestation, current_epoch, reference_ready)) {
-        last_invalid_ = !attestation.position_trusted ? InvalidReason::PositionUntrusted
+    // Эпоха исполнителя не должна меняться внутри измерения: перезапуск оси
+    // аннулирует пару опорных точек, даже если текущий снимок согласован.
+    const bool epoch_broken =
+        state_ == SessionState::AwaitingEndStop && current_start_.valid &&
+        attestation.valid && attestation.epoch != current_start_.epoch;
+    if (epoch_broken || !canConfirmReference(attestation, current_epoch, reference_ready)) {
+        last_invalid_ = epoch_broken                ? InvalidReason::EpochChanged
+                        : !attestation.position_trusted ? InvalidReason::PositionUntrusted
                         : attestation.fault            ? InvalidReason::Fault
                         : !attestation.energized       ? InvalidReason::HoldLost
                                                        : InvalidReason::StopUnconfirmed;
@@ -158,6 +177,17 @@ bool Session::confirmStart() noexcept
 bool Session::confirmEnd() noexcept
 {
     if (state_ != SessionState::EndReady || !current_start_.valid || !current_end_.valid) {
+        return false;
+    }
+    if (current_start_.epoch == 0U || current_start_.epoch != current_end_.epoch) {
+        // Эпоха исполнителя изменилась между точками: измерение недействительно.
+        last_invalid_ = InvalidReason::EpochChanged;
+        mark_recheck_required_ = true;
+        current_start_ = ReferenceAttestation{};
+        current_end_ = ReferenceAttestation{};
+        state_ = SessionState::InitialPositioning;
+        hold_active_ = true;
+        bumpRevision();
         return false;
     }
     Measurement measurement = makeMeasurement(
@@ -253,7 +283,10 @@ bool Session::addRepeat() noexcept
 
 ApplyResult Session::apply(bool acknowledge_low_repeatability) noexcept
 {
-    if (state_ != SessionState::Review) {
+    // Повторное сохранение после ошибки разрешено: рассчитанный результат
+    // остаётся в памяти, повторять измерения не требуется.
+    if (state_ != SessionState::Review && state_ != SessionState::SaveFailed &&
+        state_ != SessionState::SaveUncertain) {
         return ApplyResult::NotReady;
     }
     if (!result_.ok || result_.sample_count < params_.min_measurements) {
@@ -265,6 +298,7 @@ ApplyResult Session::apply(bool acknowledge_low_repeatability) noexcept
     }
     acknowledged_low_repeatability_ = acknowledge_low_repeatability;
     state_ = SessionState::Applying;
+    error_ = SessionError::None;
     hold_active_ = false;
     bumpRevision();
     return ApplyResult::Ok;

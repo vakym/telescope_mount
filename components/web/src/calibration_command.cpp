@@ -127,12 +127,14 @@ CalibrationCommandResult parseCalibrationCommand(CalibrationCommandKind kind,
     }
 
     bool seen_session = false;
+    bool seen_token = false;
     bool seen_generation = false;
     bool seen_axis = false;
     bool seen_direction = false;
     bool seen_revolutions = false;
     bool seen_repeats = false;
     bool seen_rate = false;
+    bool seen_index = false;
 
     std::size_t pos = 0;
     skipSpace(body, length, pos);
@@ -174,6 +176,18 @@ CalibrationCommandResult parseCalibrationCommand(CalibrationCommandKind kind,
                     return CalibrationCommandResult::InvalidValue;
                 }
                 seen_session = true;
+            } else if (std::strcmp(key, "token") == 0) {
+                if (!parseU32(value, out.token) || out.token == 0U) {
+                    return CalibrationCommandResult::InvalidValue;
+                }
+                seen_token = true;
+            } else if (std::strcmp(key, "index") == 0) {
+                if (!parseU32(value, out.index)) {
+                    return CalibrationCommandResult::InvalidValue;
+                }
+                seen_index = true;
+            } else if (std::strcmp(key, "confirm") == 0) {
+                out.confirm = std::strcmp(value, "true") == 0;
             } else if (std::strcmp(key, "motion_generation") == 0) {
                 if (!parseU32(value, out.motion_generation)) {
                     return CalibrationCommandResult::InvalidValue;
@@ -239,7 +253,13 @@ CalibrationCommandResult parseCalibrationCommand(CalibrationCommandKind kind,
             }
             break;
         case CalibrationCommandKind::Move:
-            if (!seen_session || !seen_generation || !seen_direction || !seen_rate) {
+            if (!seen_session || !seen_token || !seen_generation || !seen_direction ||
+                !seen_rate) {
+                return CalibrationCommandResult::MissingField;
+            }
+            break;
+        case CalibrationCommandKind::DeleteMeasurement:
+            if (!seen_session || !seen_token || !seen_index) {
                 return CalibrationCommandResult::MissingField;
             }
             break;
@@ -247,9 +267,13 @@ CalibrationCommandResult parseCalibrationCommand(CalibrationCommandKind kind,
             if (!seen_axis) {
                 return CalibrationCommandResult::MissingField;
             }
+            if (!out.confirm) {
+                // Необратимый сброс без явного подтверждения не принимается.
+                return CalibrationCommandResult::InvalidValue;
+            }
             break;
         default:
-            if (requiresSession(kind) && !seen_session) {
+            if (requiresSession(kind) && (!seen_session || !seen_token)) {
                 return CalibrationCommandResult::MissingField;
             }
             break;

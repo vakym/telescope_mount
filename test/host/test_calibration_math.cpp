@@ -74,5 +74,10 @@ int main()
     CHECK_NEAR(nominalDegreesPerHalfStep(4096), 360.0 / 4096.0, 1e-12);
     CHECK(toNanodegrees(360.0 / 4096.0) == 87890625);
 
+    // Знак исполнительной уставки задаёт только направление.
+    CHECK_NEAR(signedRate(motion::Direction::Forward, 120.0F), 120.0, 1e-6);
+    CHECK_NEAR(signedRate(motion::Direction::Backward, 120.0F), -120.0, 1e-6);
+    CHECK_NEAR(signedRate(motion::Direction::Backward, -120.0F), -120.0, 1e-6);
+
     return TEST_RESULT();
 }

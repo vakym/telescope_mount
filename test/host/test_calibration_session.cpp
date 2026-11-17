@@ -141,6 +141,56 @@ int main()
     CHECK(reverse.state() == SessionState::Error);
     CHECK(reverse.error() == SessionError::DirectionViolation);
 
+    // Доводка из EndReady аннулирует конечную точку и возвращает в Measuring.
+    Session adjust;
+    CHECK(adjust.start(config(), params()));
+    CHECK(adjust.ownerReady());
+    passStart(adjust, 1000, 1);
+    CHECK(adjust.requestStop());
+    CHECK(adjust.confirmStop(attestation(5096, 2), 1, true));
+    CHECK(adjust.state() == SessionState::EndReady);
+    CHECK(adjust.noteMove(motion::Direction::Forward, adjust.motionGeneration()));
+    CHECK(adjust.state() == SessionState::Measuring);
+    CHECK(!adjust.confirmEnd());
+    // Новая конечная точка появляется только после нового останова.
+    CHECK(adjust.requestStop());
+    CHECK(adjust.confirmStop(attestation(5200, 3), 1, true));
+    CHECK(adjust.confirmEnd());
+    CHECK(adjust.measurementCount() == 1);
+
+    // Повтор сохранения после ошибки использует тот же результат.
+    Session retry;
+    CHECK(retry.start(config(), params()));
+    CHECK(retry.ownerReady());
+    passStart(retry, 0, 1);
+    CHECK(retry.requestStop());
+    CHECK(retry.confirmStop(attestation(4096, 2), 1, true));
+    CHECK(retry.confirmEnd());
+    CHECK(retry.state() == SessionState::StartReady);
+    CHECK(retry.confirmStart());
+    CHECK(retry.requestStop());
+    CHECK(retry.confirmStop(attestation(8192, 3), 1, true));
+    CHECK(retry.confirmEnd());
+    CHECK(retry.state() == SessionState::Review);
+    CHECK(retry.apply(false) == ApplyResult::Ok);
+    retry.beginSaving();
+    retry.saveFailed();
+    CHECK(retry.state() == SessionState::SaveFailed);
+    CHECK(retry.apply(false) == ApplyResult::Ok);
+    CHECK(retry.state() == SessionState::Applying);
+
+    // Эпоха исполнителя не должна меняться между опорными точками.
+    Session epoch;
+    CHECK(epoch.start(config(), params()));
+    CHECK(epoch.ownerReady());
+    passStart(epoch, 0, 1);
+    CHECK(epoch.requestStop());
+    ReferenceAttestation moved_epoch = attestation(4096, 2);
+    moved_epoch.epoch = 2;
+    CHECK(!epoch.confirmStop(moved_epoch, 2, true));
+    CHECK(epoch.state() == SessionState::InitialPositioning);
+    CHECK(epoch.lastInvalidReason() == InvalidReason::EpochChanged);
+
     // Stop не подтверждается без удержания.
     Session no_hold;
     CHECK(no_hold.start(config(), params()));

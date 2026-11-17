@@ -253,6 +253,8 @@ private:
 
     std::atomic<bool> permit_requested_{false};
     std::atomic<bool> safety_stop_requested_{false};
+    /// Останов калибровки: не отзывает владение и разрешение.
+    std::atomic<bool> calibration_stop_requested_{false};
     std::atomic<bool> shutdown_requested_{false};
     std::atomic<bool> stop_failed_{false};
 

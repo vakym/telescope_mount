@@ -74,6 +74,21 @@ void CalibrationService::unlock() const
     (void)xSemaphoreGive(mutex_);
 }
 
+bool CalibrationService::tokenValid(std::uint32_t token) const noexcept
+{
+    return session_id_ != 0U && token != 0U && token == session_token_;
+}
+
+void CalibrationService::finishSessionLocked(calibration::Micros now)
+{
+    if (!released_) {
+        move_active_ = false;
+        stop_pending_ = false;
+        releaseSession(now);
+        released_ = true;
+    }
+}
+
 esp_err_t CalibrationService::start()
 {
     if (running_.exchange(true)) {
@@ -171,6 +186,11 @@ CalibrationStatus CalibrationService::status() const
     out.revolutions = session_.config().revolutions;
     out.repeats = session_.config().repeats;
     out.measurement_count = static_cast<std::uint32_t>(session_.measurementCount());
+    const calibration::Measurement *measurements = session_.measurements();
+    for (std::size_t i = 0; i < session_.measurementCount() && i < calibration::kMaxMeasurements;
+         ++i) {
+        out.measurements[i] = measurements[i];
+    }
     out.result = session_.result();
     out.mark_recheck_required = session_.markRecheckRequired();
     out.hold_active = hold_started_;
@@ -189,9 +209,11 @@ CalibrationStatus CalibrationService::status() const
 }
 
 CommandOutcome CalibrationService::createSession(const SessionRequest &request,
-                                                 std::uint32_t &session_id)
+                                                 std::uint32_t &session_id,
+                                                 std::uint32_t &token)
 {
     session_id = 0;
+    token = 0;
     calibration::SessionConfig config{};
     config.axis = request.axis;
     config.direction = request.direction;
@@ -208,6 +230,9 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
         return CommandOutcome::Busy;
     }
     if (session_.terminal()) {
+        // Освобождение старых ресурсов выполняется синхронно, не полагаясь на
+        // то, что фоновая задача успеет сделать цикл между HTTP-командами.
+        finishSessionLocked(port_.nowUs());
         session_.close();
     }
     if (!session_.start(config, params_)) {
@@ -218,10 +243,16 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
     if (next_session_id_ == 0U) {
         next_session_id_ = 1;
     }
+    session_token_ = ++token_counter_;
+    if (session_token_ == 0U) {
+        session_token_ = ++token_counter_;
+    }
+    token = session_token_;
     session_id = session_id_;
     ownership_claimed_ = false;
     claim_retry_us_ = 0;
     hold_started_ = false;
+    reference_epoch_ = 0;
     readiness_refresh_us_ = 0;
     hold_deadline_us_ = 0;
     move_active_ = false;
@@ -236,23 +267,7 @@ CommandOutcome CalibrationService::createSession(const SessionRequest &request,
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::closeSession(std::uint32_t session)
-{
-    if (!lock()) {
-        return CommandOutcome::Busy;
-    }
-    if (session != session_id_ || !session_.terminal()) {
-        unlock();
-        return CommandOutcome::InvalidState;
-    }
-    session_.close();
-    session_id_ = 0;
-    unlock();
-    return CommandOutcome::Ok;
-}
-
-CommandOutcome CalibrationService::move(std::uint32_t session, motion::Direction direction,
-                                        float rate, std::uint32_t expected_generation)
+CommandOutcome CalibrationService::closeSession(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -261,8 +276,41 @@ CommandOutcome CalibrationService::move(std::uint32_t session, motion::Direction
         unlock();
         return CommandOutcome::StaleSession;
     }
-    if (!std::isfinite(rate) || rate == 0.0F ||
-        std::fabs(rate) > static_cast<float>(CONFIG_CAL_MAX_RATE_HALF_STEPS_PER_S)) {
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
+    if (!session_.terminal()) {
+        unlock();
+        return CommandOutcome::InvalidState;
+    }
+    finishSessionLocked(port_.nowUs());
+    session_.close();
+    session_id_ = 0;
+    session_token_ = 0;
+    unlock();
+    return CommandOutcome::Ok;
+}
+
+CommandOutcome CalibrationService::move(std::uint32_t session, std::uint32_t token,
+                                        motion::Direction direction, float rate,
+                                        std::uint32_t expected_generation)
+{
+    if (!lock()) {
+        return CommandOutcome::Busy;
+    }
+    if (session != session_id_ || session_id_ == 0U) {
+        unlock();
+        return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
+    // Клиент передаёт модуль скорости; знак задаётся только направлением.
+    // Отрицательная уставка отклоняется, чтобы не было двух источников знака.
+    if (!std::isfinite(rate) || rate <= 0.0F ||
+        rate > static_cast<float>(CONFIG_CAL_MAX_RATE_HALF_STEPS_PER_S)) {
         unlock();
         return CommandOutcome::InvalidArgument;
     }
@@ -302,7 +350,7 @@ bool CalibrationService::requestStopInternal(calibration::Micros now)
     return port_.requestStop(stop_request_id_);
 }
 
-CommandOutcome CalibrationService::stop(std::uint32_t session)
+CommandOutcome CalibrationService::stop(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -310,6 +358,10 @@ CommandOutcome CalibrationService::stop(std::uint32_t session)
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
     }
     if (stop_pending_) {
         unlock();
@@ -327,7 +379,7 @@ CommandOutcome CalibrationService::stop(std::uint32_t session)
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::confirmStart(std::uint32_t session)
+CommandOutcome CalibrationService::confirmStart(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -335,6 +387,16 @@ CommandOutcome CalibrationService::confirmStart(std::uint32_t session)
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
+    // Повторная проверка условий в момент пользовательского подтверждения:
+    // доверять только раннему снимку нельзя.
+    if (!liveReferenceValid(port_.snapshot())) {
+        unlock();
+        return CommandOutcome::InvalidState;
     }
     if (!session_.confirmStart()) {
         unlock();
@@ -348,7 +410,7 @@ CommandOutcome CalibrationService::confirmStart(std::uint32_t session)
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::confirmEnd(std::uint32_t session)
+CommandOutcome CalibrationService::confirmEnd(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -356,6 +418,14 @@ CommandOutcome CalibrationService::confirmEnd(std::uint32_t session)
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
+    if (!liveReferenceValid(port_.snapshot())) {
+        unlock();
+        return CommandOutcome::InvalidState;
     }
     if (!session_.confirmEnd()) {
         unlock();
@@ -366,7 +436,7 @@ CommandOutcome CalibrationService::confirmEnd(std::uint32_t session)
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::resume(std::uint32_t session)
+CommandOutcome CalibrationService::resume(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -374,6 +444,10 @@ CommandOutcome CalibrationService::resume(std::uint32_t session)
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
     }
     if (!session_.resume()) {
         unlock();
@@ -384,7 +458,7 @@ CommandOutcome CalibrationService::resume(std::uint32_t session)
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::abandon(std::uint32_t session)
+CommandOutcome CalibrationService::abandon(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -392,6 +466,10 @@ CommandOutcome CalibrationService::abandon(std::uint32_t session)
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
     }
     if (!session_.abandon()) {
         unlock();
@@ -403,7 +481,8 @@ CommandOutcome CalibrationService::abandon(std::uint32_t session)
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session, std::size_t index)
+CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session,
+                                                     std::uint32_t token, std::size_t index)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -411,6 +490,10 @@ CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session, std:
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
     }
     if (!session_.deleteMeasurement(index)) {
         unlock();
@@ -421,7 +504,7 @@ CommandOutcome CalibrationService::deleteMeasurement(std::uint32_t session, std:
     return CommandOutcome::Ok;
 }
 
-CommandOutcome CalibrationService::addRepeat(std::uint32_t session)
+CommandOutcome CalibrationService::addRepeat(std::uint32_t session, std::uint32_t token)
 {
     if (!lock()) {
         return CommandOutcome::Busy;
@@ -430,6 +513,10 @@ CommandOutcome CalibrationService::addRepeat(std::uint32_t session)
         unlock();
         return CommandOutcome::StaleSession;
     }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
+    }
     if (!session_.addRepeat()) {
         unlock();
         return CommandOutcome::InvalidState;
@@ -437,6 +524,7 @@ CommandOutcome CalibrationService::addRepeat(std::uint32_t session)
     ownership_claimed_ = false;
     hold_started_ = false;
     claim_retry_us_ = 0;
+    reference_epoch_ = 0;
     // Повтор требует заново получить владение и удержание: освобождение в
     // Review уже произошло, поэтому фиксация «освобождено» снимается.
     released_ = false;
@@ -470,7 +558,7 @@ int CalibrationService::persist(const calibration::CombinedResult &result)
     return verified ? 2 : 1;
 }
 
-CommandOutcome CalibrationService::apply(std::uint32_t session,
+CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint32_t token,
                                          bool acknowledge_low_repeatability)
 {
     if (!lock()) {
@@ -479,6 +567,10 @@ CommandOutcome CalibrationService::apply(std::uint32_t session,
     if (session != session_id_ || session_id_ == 0U) {
         unlock();
         return CommandOutcome::StaleSession;
+    }
+    if (!tokenValid(token)) {
+        unlock();
+        return CommandOutcome::Forbidden;
     }
     const calibration::ApplyResult applied =
         session_.apply(acknowledge_low_repeatability);
@@ -520,9 +612,13 @@ bool CalibrationService::persistNominal(motion::AxisId axis)
            loaded.record.nanodegrees_per_half_step == record.nanodegrees_per_half_step;
 }
 
-CommandOutcome CalibrationService::resetAxis(motion::AxisId axis)
+CommandOutcome CalibrationService::resetAxis(motion::AxisId axis, bool confirmed)
 {
     if (axisIndex(axis) >= 2) {
+        return CommandOutcome::InvalidArgument;
+    }
+    if (!confirmed) {
+        // Необратимый сброс требует явного подтверждения, а не только кнопки.
         return CommandOutcome::InvalidArgument;
     }
     if (!lock()) {
@@ -553,15 +649,109 @@ void CalibrationService::refreshReadiness(calibration::Micros now)
         return;
     }
     const bool ready = ownership_claimed_ && hold_started_;
-    port_.setInputReady(ready, session_id_,
-                        now + static_cast<calibration::Micros>(CONFIG_CAL_READINESS_LEASE_MS) *
-                                  1000ULL);
+    const calibration::Micros lease =
+        static_cast<calibration::Micros>(CONFIG_CAL_READINESS_LEASE_MS) * 1000ULL;
+    port_.setInputReady(ready, session_id_, now + lease);
+    // Арбитражный слот живёт по lease уставки: без периодического продления
+    // владение истекло бы через секунду даже без движения. Повторяем текущую
+    // уставку (0 при простое), а не нулевую всегда, иначе остановилось бы
+    // движение.
+    const float rate = move_active_ ? calibration::signedRate(move_direction_, move_rate_)
+                                    : 0.0F;
+    (void)port_.setRate(session_id_, session_.config().axis, rate, lease);
     readiness_refresh_us_ = now;
+}
+
+bool CalibrationService::liveReferenceValid(const calibration::Snapshot &snapshot) const noexcept
+{
+    const std::size_t index = axisIndex(session_.config().axis);
+    return !session_.terminal() && ownership_claimed_ && hold_started_ &&
+           snapshot.owner == state::SourceId::Calibration && snapshot.input_ready &&
+           snapshot.position_trusted[index] && !snapshot.has_fault[index] &&
+           snapshot.energized[index];
+}
+
+void CalibrationService::validateMeasurement(calibration::Micros now,
+                                             const calibration::Snapshot &snapshot)
+{
+    (void)now;
+    if (stop_pending_) {
+        // Останов сам меняет уставки и может кратковременно снимать питание:
+        // достоверность проверяется после подтверждения.
+        return;
+    }
+    const calibration::SessionState state = session_.state();
+    if (state != calibration::SessionState::StartReady &&
+        state != calibration::SessionState::Measuring &&
+        state != calibration::SessionState::EndReady &&
+        state != calibration::SessionState::AwaitingStartStop &&
+        state != calibration::SessionState::AwaitingEndStop) {
+        return;
+    }
+    const std::size_t index = axisIndex(session_.config().axis);
+    if (snapshot.has_fault[index] || !snapshot.position_trusted[index]) {
+        move_active_ = false;
+        failSession(calibration::SessionError::MeasurementInvalid);
+        return;
+    }
+    if (reference_epoch_ != 0U && snapshot.command_epoch[index] != reference_epoch_) {
+        move_active_ = false;
+        failSession(calibration::SessionError::MeasurementInvalid);
+        return;
+    }
+    if (hold_started_ && !snapshot.energized[index]) {
+        // Удержание потеряно: точки недостоверны. Пытаемся восстановить
+        // удержание; если не удаётся — сессия завершается ошибкой.
+        move_active_ = false;
+        session_.holdLost();
+        hold_started_ = false;
+        hold_deadline_us_ = now + static_cast<calibration::Micros>(CONFIG_CAL_MAX_REFERENCE_HOLD_MS) *
+                                      1000ULL;
+        if (!port_.beginHold(session_.config().axis, session_id_, hold_deadline_us_)) {
+            failSession(calibration::SessionError::HoldUnavailable);
+            return;
+        }
+        hold_started_ = true;
+    }
+}
+
+void CalibrationService::stepActive(calibration::Micros now,
+                                    const calibration::Snapshot &snapshot)
+{
+    if (session_.state() == calibration::SessionState::InitialPositioning) {
+        reference_epoch_ = 0;
+    }
+    if (ownership_claimed_ && snapshot.owner != state::SourceId::Calibration) {
+        // Владение отозвано извне (аварийный останов, потеря сессии):
+        // сессия не продолжается, удержание будет восстановлено при очистке.
+        failSession(calibration::SessionError::HoldUnavailable);
+        return;
+    }
+    if (ownership_claimed_ && !snapshot.permit) {
+        // Разрешение движения снято (disarm или истечение владельца).
+        move_active_ = false;
+        session_.leaseExpired();
+        return;
+    }
+    refreshReadiness(now);
+    validateMeasurement(now, snapshot);
+    if (session_.terminal()) {
+        return;
+    }
+    driveMove(now, snapshot);
+    superviseStop(now, snapshot);
 }
 
 void CalibrationService::stepPreparing(calibration::Micros now,
                                        const calibration::Snapshot &snapshot)
 {
+    // Владение могло быть отозвано аварийным остановом или запоздавшим
+    // release предыдущей сессии: тогда claim повторяется немедленно.
+    if (ownership_claimed_ && snapshot.owner != state::SourceId::Calibration) {
+        ownership_claimed_ = false;
+        hold_started_ = false;
+        claim_retry_us_ = 0;
+    }
     if (!ownership_claimed_) {
         if (snapshot.owner == state::SourceId::Calibration) {
             ownership_claimed_ = true;
@@ -595,7 +785,20 @@ void CalibrationService::driveMove(calibration::Micros now,
         return;
     }
     if (now > move_until_us_) {
+        // Браузер перестал продлевать разрешение: это не штатный останов.
+        // Текущее измерение аннулируется, ось останавливается.
         move_active_ = false;
+        const calibration::SessionState state = session_.state();
+        if (state == calibration::SessionState::Measuring) {
+            (void)session_.abandon();
+        }
+        if (state == calibration::SessionState::Measuring ||
+            state == calibration::SessionState::InitialPositioning ||
+            state == calibration::SessionState::EndReady) {
+            if (session_.requestStop()) {
+                (void)requestStopInternal(now);
+            }
+        }
         return;
     }
     const calibration::SessionState state = session_.state();
@@ -615,8 +818,16 @@ void CalibrationService::driveMove(calibration::Micros now,
         move_active_ = false;
         return;
     }
-    (void)port_.setRate(session_id_, session_.config().axis, move_rate_,
-                        static_cast<calibration::Micros>(CONFIG_CAL_MOVE_LEASE_MS) * 1000ULL);
+    // Знак задаётся направлением, модуль — клиентом. Срок уставки не
+    // продлевается за дедлайн разрешения браузера.
+    calibration::Micros lease_us =
+        static_cast<calibration::Micros>(CONFIG_CAL_MOVE_LEASE_MS) * 1000ULL;
+    const calibration::Micros remaining = move_until_us_ > now ? move_until_us_ - now : 0;
+    if (remaining < lease_us) {
+        lease_us = remaining;
+    }
+    (void)port_.setRate(session_id_, session_.config().axis,
+                        calibration::signedRate(move_direction_, move_rate_), lease_us);
     if (state == calibration::SessionState::Measuring &&
         measure_started_us_ != 0 &&
         now - measure_started_us_ >
@@ -653,8 +864,12 @@ void CalibrationService::superviseStop(calibration::Micros now,
         reference.energized = attestation.energized[index];
         reference.fault = snapshot.has_fault[index];
         const bool reference_ready = hold_started_ && reference.energized;
-        (void)session_.confirmStop(reference, snapshot.command_epoch[index],
-                                   reference_ready);
+        const bool accepted = session_.confirmStop(reference, snapshot.command_epoch[index],
+                                                   reference_ready);
+        if (accepted && session_.state() == calibration::SessionState::StartReady) {
+            // Эпоха стартовой точки фиксируется для контроля всего измерения.
+            reference_epoch_ = reference.epoch;
+        }
         return;
     }
     if (now - stop_requested_us_ > kStopConfirmTimeoutUs) {
@@ -724,7 +939,8 @@ void CalibrationService::step()
     if (!lock(10)) {
         return;
     }
-    if (!session_.active()) {
+    if (!session_.active() && !session_.terminal()) {
+        // Inactive без терминального состояния: освобождать нечего, сессии нет.
         unlock();
         return;
     }
@@ -737,13 +953,10 @@ void CalibrationService::step()
         state_since_us_ = now;
     }
 
+    // Терминальная очистка выполняется и для Cancelled, который не считается
+    // active(): ресурсы освобождаются до того, как клиент закроет сессию.
     if (session_.terminal()) {
-        if (!released_) {
-            move_active_ = false;
-            stop_pending_ = false;
-            releaseSession(now);
-            released_ = true;
-        }
+        finishSessionLocked(now);
         unlock();
         return;
     }
@@ -769,9 +982,7 @@ void CalibrationService::step()
             superviseStop(now, snapshot);
             break;
         default:
-            refreshReadiness(now);
-            driveMove(now, snapshot);
-            superviseStop(now, snapshot);
+            stepActive(now, snapshot);
             break;
     }
 

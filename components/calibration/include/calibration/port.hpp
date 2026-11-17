@@ -45,6 +45,7 @@ struct Snapshot {
     float rate[2] = {0.0F, 0.0F};
     state::SourceId owner = state::SourceId::None;
     state::ControlPhase phase = state::ControlPhase::Disarmed;
+    bool permit = false;
     std::uint32_t owner_generation = 0;
     std::uint32_t motion_generation = 0;
     bool input_ready = false;

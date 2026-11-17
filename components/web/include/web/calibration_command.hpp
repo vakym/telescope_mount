@@ -20,6 +20,10 @@ enum class CalibrationCommandKind : std::uint8_t {
     Stop,
     ConfirmStart,
     ConfirmEnd,
+    Resume,
+    Abandon,
+    DeleteMeasurement,
+    AddRepeat,
     Apply,
     Close,
     Reset,
@@ -34,13 +38,16 @@ enum class CalibrationCommandResult : std::uint8_t {
 
 struct CalibrationCommand {
     std::uint32_t session_id = 0;
+    std::uint32_t token = 0;  ///< токен владельца сессии
     std::uint32_t motion_generation = 0;
     std::uint32_t revolutions = 1;
     std::uint32_t repeats = 2;
+    std::uint32_t index = 0;  ///< номер измерения для удаления
     float rate = 0.0F;
     int axis = -1;       ///< 0 — азимут, 1 — высота
     int direction = -1;  ///< 0 — вперёд, 1 — назад
     bool acknowledge_low_repeatability = false;
+    bool confirm = false;  ///< явное подтверждение необратимого сброса
 };
 
 /// Максимальный предел модуля скорости; сервис дополнительно ограничивает.

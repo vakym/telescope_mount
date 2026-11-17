@@ -191,7 +191,8 @@ esp_err_t ControlService::requestCalibrationStop(std::uint64_t request_id)
     if (!pending_calibration_stop_.compare_exchange_strong(expected, request_id)) {
         return ESP_OK;
     }
-    safety_stop_requested_.store(true);
+    // Не safety stop: владение и разрешение сохраняются до подтверждения.
+    calibration_stop_requested_.store(true);
     return ESP_OK;
 }
 
@@ -381,6 +382,7 @@ esp_err_t ControlService::start(const control::JoyMappingConfig &mapping)
 
     permit_requested_.store(false);
     safety_stop_requested_.store(false);
+    calibration_stop_requested_.store(false);
     shutdown_requested_.store(false);
     stop_failed_.store(false);
 
@@ -1008,6 +1010,7 @@ void ControlService::driveLoop(Micros now)
         delivery_failures_[1] >= CONFIG_CTRL_DELIVERY_FAILURE_LIMIT;
     inputs.stop_requested = safety_stop_requested_.exchange(false) ||
                             shutdown_requested_.load();
+    inputs.calibration_stop = calibration_stop_requested_.exchange(false);
     inputs.stopped_confirmed = stoppedConfirmed();
     inputs.stop_failed = stop_failed_flag_;
     stop_failed_flag_ = false;  // исход прошлого цикла передан автомату
@@ -1052,7 +1055,12 @@ void ControlService::driveLoop(Micros now)
         start.now_us = nowUs();
         start.baseline_epoch[0] = axis_[0].command_epoch;
         start.baseline_epoch[1] = axis_[1].command_epoch;
-        start.request_id = pending_calibration_stop_.exchange(0);
+        start.request_id = decision.stop_reason == control::StopReason::Calibration
+                               ? pending_calibration_stop_.exchange(0)
+                               : 0;
+        if (decision.stop_reason != control::StopReason::Calibration) {
+            pending_calibration_stop_.store(0);
+        }
         stop_protocol_.begin(start);
         arming_.noteStopIssued(decision.stop_reason);
         stop_failed_flag_ = false;
@@ -1262,9 +1270,21 @@ void ControlService::applyCalibrationRequests(Micros now)
         const motion::AxisId id = static_cast<motion::AxisId>(i);
         CalibrationHold &hold = calibration_hold_[i];
         if (request.begin) {
-            if (!hold.active || hold.session != request.session) {
+            if (!hold.active) {
                 // Исходная политика берётся из конфигурации, а не угадывается.
                 hold.original = port_.holdPolicy(id);
+                hold.active = true;
+                hold.session = request.session;
+                hold.deadline = request.deadline;
+                calibration_ready_seen_ = false;
+                (void)port_.setHoldPolicy(id, motion::HoldPolicy{true, 0});
+            } else if (hold.session != request.session) {
+                // Новая сессия поверх старой: сначала восстанавливаем
+                // сохранённую исходную политику, иначе она будет потеряна.
+                const motion::HoldPolicy original = hold.original;
+                (void)port_.setHoldPolicy(id, original);
+                hold = CalibrationHold{};
+                hold.original = original;
                 hold.active = true;
                 hold.session = request.session;
                 hold.deadline = request.deadline;

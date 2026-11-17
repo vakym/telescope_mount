@@ -83,6 +83,11 @@ ArmingDecision ArmingMachine::step(const ArmingInputs &in) noexcept
                                          : StopReason::DeliveryLimit);
             out.request_stop = true;
             out.revoke_ownership = true;
+        } else if (in.calibration_stop) {
+            // Штатный останов для фиксации опорной точки: владение, permit и
+            // удержание остаются, чтобы сессия могла продолжиться.
+            beginStopping(StopReason::Calibration);
+            out.request_stop = true;
         } else if (in.handover_pending && phase_ == state::ControlPhase::Active) {
             beginStopping(StopReason::Handover);
             out.request_stop = true;

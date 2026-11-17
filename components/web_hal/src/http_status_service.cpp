@@ -63,6 +63,7 @@ web::CalibrationView toView(const calibration_hal::CalibrationStatus &status)
     view.revolutions = status.revolutions;
     view.repeats = status.repeats;
     view.measurement_count = status.measurement_count;
+    view.measurements = status.measurements;
     view.result = status.result;
     view.mark_recheck_required = status.mark_recheck_required;
     view.hold_active = status.hold_active;
@@ -104,10 +105,21 @@ constexpr PostRoute kCalibrationPosts[] = {
     {"/api/calibration/stop", web::CalibrationCommandKind::Stop},
     {"/api/calibration/confirm-start", web::CalibrationCommandKind::ConfirmStart},
     {"/api/calibration/confirm-end", web::CalibrationCommandKind::ConfirmEnd},
+    {"/api/calibration/resume", web::CalibrationCommandKind::Resume},
+    {"/api/calibration/abandon", web::CalibrationCommandKind::Abandon},
+    {"/api/calibration/measurements/delete", web::CalibrationCommandKind::DeleteMeasurement},
+    {"/api/calibration/repeat", web::CalibrationCommandKind::AddRepeat},
     {"/api/calibration/apply", web::CalibrationCommandKind::Apply},
     {"/api/calibration/close", web::CalibrationCommandKind::Close},
     {"/api/calibration/reset", web::CalibrationCommandKind::Reset},
 };
+
+/// Заголовок действия: простой межсайтовый POST его не выставит, поэтому
+/// браузер обязан пройти preflight, а запрос с чужого origin не пройдёт.
+constexpr const char *kCommandHeader = "X-Mount-Command";
+constexpr const char *kCommandHeaderValue = "1";
+constexpr const char *kBadMediaTypeBody = "{\"error\":\"unsupported_media_type\"}";
+constexpr const char *kForbiddenBody = "{\"error\":\"forbidden\"}";
 
 const char *outcomeText(calibration_hal::CommandOutcome outcome)
 {
@@ -124,6 +136,8 @@ const char *outcomeText(calibration_hal::CommandOutcome outcome)
             return "busy";
         case calibration_hal::CommandOutcome::StaleSession:
             return "stale_session";
+        case calibration_hal::CommandOutcome::Forbidden:
+            return "forbidden";
     }
     return "invalid_state";
 }
@@ -395,7 +409,7 @@ web::StartOutcome HttpStatusService::portStart()
     config.core_id = CONFIG_WEB_TASK_CORE;
     config.max_open_sockets =
         static_cast<std::uint16_t>(CONFIG_WEB_MAX_OPEN_SOCKETS);
-    config.max_uri_handlers = 12;
+    config.max_uri_handlers = 16;
     config.max_resp_headers = 4;
     config.backlog_conn = static_cast<std::uint16_t>(CONFIG_WEB_BACKLOG);
     config.recv_wait_timeout =
@@ -637,6 +651,26 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
         httpd_resp_set_type(req, kJsonContentType);
         return httpd_resp_send(req, kNotFoundBody, HTTPD_RESP_USE_STRLEN);
     }
+    // Разграничение наблюдателя и управляющего клиента: изменяющий запрос
+    // обязан нести заголовок действия и JSON-тип. Простой межсайтовый POST
+    // такой заголовок не выставит, поэтому preflight обязателен.
+    char action_header[16];
+    if (httpd_req_get_hdr_value_str(req, kCommandHeader, action_header,
+                                    sizeof(action_header)) != ESP_OK ||
+        std::strcmp(action_header, kCommandHeaderValue) != 0) {
+        self->request_failures_.fetch_add(1, std::memory_order_relaxed);
+        httpd_resp_set_status(req, "403 Forbidden");
+        httpd_resp_set_type(req, kJsonContentType);
+        return httpd_resp_send(req, kForbiddenBody, HTTPD_RESP_USE_STRLEN);
+    }
+    char content_type[40];
+    if (httpd_req_get_hdr_value_str(req, "Content-Type", content_type,
+                                    sizeof(content_type)) != ESP_OK ||
+        std::strncmp(content_type, "application/json", 16) != 0) {
+        httpd_resp_set_status(req, "415 Unsupported Media Type");
+        httpd_resp_set_type(req, kJsonContentType);
+        return httpd_resp_send(req, kBadMediaTypeBody, HTTPD_RESP_USE_STRLEN);
+    }
     if (req->content_len < 0 ||
         static_cast<std::size_t>(req->content_len) > kMaxCommandBodyBytes) {
         httpd_resp_set_status(req, "413 Payload Too Large");
@@ -671,6 +705,8 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
     }
 
     calibration_hal::CommandOutcome outcome = calibration_hal::CommandOutcome::InvalidState;
+    std::uint32_t created_session = 0;
+    std::uint32_t created_token = 0;
     switch (kind) {
         case web::CalibrationCommandKind::CreateSession: {
             calibration_hal::SessionRequest request{};
@@ -680,40 +716,66 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
                                                        : motion::Direction::Forward;
             request.revolutions = command.revolutions;
             request.repeats = command.repeats;
-            std::uint32_t session = 0;
-            outcome = self->calibration_.createSession(request, session);
+            outcome = self->calibration_.createSession(request, created_session,
+                                                       created_token);
             break;
         }
         case web::CalibrationCommandKind::Move:
             outcome = self->calibration_.move(
-                command.session_id,
+                command.session_id, command.token,
                 command.direction == 1 ? motion::Direction::Backward
                                        : motion::Direction::Forward,
                 command.rate, command.motion_generation);
             break;
         case web::CalibrationCommandKind::Stop:
-            outcome = self->calibration_.stop(command.session_id);
+            outcome = self->calibration_.stop(command.session_id, command.token);
             break;
         case web::CalibrationCommandKind::ConfirmStart:
-            outcome = self->calibration_.confirmStart(command.session_id);
+            outcome = self->calibration_.confirmStart(command.session_id, command.token);
             break;
         case web::CalibrationCommandKind::ConfirmEnd:
-            outcome = self->calibration_.confirmEnd(command.session_id);
+            outcome = self->calibration_.confirmEnd(command.session_id, command.token);
+            break;
+        case web::CalibrationCommandKind::Resume:
+            outcome = self->calibration_.resume(command.session_id, command.token);
+            break;
+        case web::CalibrationCommandKind::Abandon:
+            outcome = self->calibration_.abandon(command.session_id, command.token);
+            break;
+        case web::CalibrationCommandKind::DeleteMeasurement:
+            outcome = self->calibration_.deleteMeasurement(command.session_id, command.token,
+                                                           command.index);
+            break;
+        case web::CalibrationCommandKind::AddRepeat:
+            outcome = self->calibration_.addRepeat(command.session_id, command.token);
             break;
         case web::CalibrationCommandKind::Apply:
-            outcome = self->calibration_.apply(command.session_id,
+            outcome = self->calibration_.apply(command.session_id, command.token,
                                                command.acknowledge_low_repeatability);
             break;
         case web::CalibrationCommandKind::Close:
-            outcome = self->calibration_.closeSession(command.session_id);
+            outcome = self->calibration_.closeSession(command.session_id, command.token);
             break;
         case web::CalibrationCommandKind::Reset:
             outcome = self->calibration_.resetAxis(
-                command.axis == 1 ? motion::AxisId::Altitude : motion::AxisId::Azimuth);
+                command.axis == 1 ? motion::AxisId::Altitude : motion::AxisId::Azimuth,
+                command.confirm);
             break;
     }
 
     if (outcome == calibration_hal::CommandOutcome::Ok) {
+        if (kind == web::CalibrationCommandKind::CreateSession) {
+            // Токен выдаётся только создателю и не публикуется в статусе.
+            char created[96];
+            std::snprintf(created, sizeof(created),
+                          "{\"session_id\":%u,\"token\":%u}",
+                          static_cast<unsigned>(created_session),
+                          static_cast<unsigned>(created_token));
+            httpd_resp_set_status(req, "200 OK");
+            httpd_resp_set_type(req, kJsonContentType);
+            httpd_resp_set_hdr(req, kCacheControl, kNoStore);
+            return httpd_resp_send(req, created, HTTPD_RESP_USE_STRLEN);
+        }
         return self->sendCalibrationStatus(req);
     }
     char error_body[64];
@@ -724,6 +786,8 @@ esp_err_t HttpStatusService::calibrationCommandHandler(httpd_req_t *req)
         status = "400 Bad Request";
     } else if (outcome == calibration_hal::CommandOutcome::Busy) {
         status = "429 Too Many Requests";
+    } else if (outcome == calibration_hal::CommandOutcome::Forbidden) {
+        status = "403 Forbidden";
     }
     httpd_resp_set_status(req, status);
     httpd_resp_set_type(req, kJsonContentType);

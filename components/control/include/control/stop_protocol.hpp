@@ -28,7 +28,9 @@ enum class StopReason : std::uint8_t {
     MotorFault,
     DeliveryLimit,
     Shutdown,
-    Acknowledge
+    Acknowledge,
+    /// Штатный останов калибровки: владение, permit и удержание сохраняются.
+    Calibration
 };
 
 enum class StopMode : std::uint8_t { Smooth, Immediate };

@@ -19,7 +19,7 @@
 namespace web {
 
 /// Верхняя граница документа статуса калибровки.
-constexpr std::size_t kMaxCalibrationJsonBytes = 2048;
+constexpr std::size_t kMaxCalibrationJsonBytes = 4096;
 
 struct CalibrationView {
     calibration::SessionState state = calibration::SessionState::Inactive;
@@ -33,6 +33,8 @@ struct CalibrationView {
     std::uint32_t revolutions = 0;
     std::uint32_t repeats = 0;
     std::uint32_t measurement_count = 0;
+    /// Массив измерений сессии; nullptr при measurement_count == 0.
+    const calibration::Measurement *measurements = nullptr;
     calibration::CombinedResult result{};
     bool mark_recheck_required = false;
     bool hold_active = false;

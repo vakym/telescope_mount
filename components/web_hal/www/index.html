@@ -114,6 +114,8 @@
   }
   .cal-controls input[type="number"] { width: 72px; }
   .cal-message { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+  .cal-list { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+  .cal-list li { margin: 2px 0; }
   @media (min-width: 760px) {
     main { grid-template-columns: 1fr 1fr; }
     #control-card, #cal-card, details.card, footer { grid-column: 1 / -1; }
@@ -208,11 +210,19 @@
       <div>
         <button id="cal-confirm-start" type="button">Подтвердить старт</button>
         <button id="cal-confirm-end" type="button">Подтвердить конец</button>
+        <button id="cal-resume" type="button">Продолжить</button>
+        <button id="cal-abandon" type="button">Отменить доводку</button>
+      </div>
+      <div>
         <button id="cal-apply" type="button">Применить</button>
+        <button id="cal-repeat" type="button">Ещё повтор</button>
+        <input id="cal-index" type="number" min="0" max="7" value="0" title="Номер измерения">
+        <button id="cal-delete" type="button">Удалить измерение</button>
         <button id="cal-close" type="button">Закрыть</button>
         <button id="cal-reset" type="button">Сброс к номиналу</button>
       </div>
       <p id="cal-message" class="cal-message">Сессия не создана.</p>
+      <ul id="cal-measurements" class="cal-list"></ul>
     </div>
   </section>
 
@@ -586,8 +596,30 @@
 
   // --- Калибровка масштаба ---
   var CAL_POLL_MS = 700;
+  var CAL_TOKEN_KEY = "mount.calibration.token";
   var calLast = null;
   var calMoveTimer = null;
+  var calMoving = false;
+
+  function calToken() {
+    try {
+      return sessionStorage.getItem(CAL_TOKEN_KEY) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function setCalToken(token) {
+    try {
+      if (token) {
+        sessionStorage.setItem(CAL_TOKEN_KEY, String(token));
+      } else {
+        sessionStorage.removeItem(CAL_TOKEN_KEY);
+      }
+    } catch (error) {
+      // Приватный режим без storage: токен живёт только до перезагрузки.
+    }
+  }
 
   function calMessage(text) {
     var node = byId("cal-message");
@@ -616,12 +648,39 @@
                           state === "measuring" || state === "end_ready");
     calEnable("cal-confirm-start", state === "start_ready");
     calEnable("cal-confirm-end", state === "end_ready");
-    calEnable("cal-apply", state === "review");
+    calEnable("cal-resume", state === "end_ready");
+    calEnable("cal-abandon", state === "measuring" || state === "end_ready");
+    calEnable("cal-apply", state === "review" || state === "save_failed" ||
+                          state === "save_uncertain");
+    calEnable("cal-repeat", state === "review");
+    calEnable("cal-delete", state === "review");
     calEnable("cal-close", calTerminal(state));
     var movable = state === "initial_positioning" || state === "measuring" ||
                   state === "end_ready";
     calEnable("cal-move-forward", movable);
     calEnable("cal-move-backward", movable);
+  }
+
+  function renderMeasurements(list) {
+    var node = byId("cal-measurements");
+    if (!node) {
+      return;
+    }
+    node.textContent = "";
+    if (!Array.isArray(list) || list.length === 0) {
+      return;
+    }
+    list.forEach(function (item) {
+      var li = document.createElement("li");
+      var text = "#" + item.index + ": " + item.revolutions + " об., " +
+                 item.delta_half_steps + " полушагов, " +
+                 item.degrees_per_half_step.toFixed(6) + " °/шаг";
+      if (!item.valid) {
+        text += " — недопустимо (" + item.reason + ")";
+      }
+      li.textContent = text;
+      node.appendChild(li);
+    });
   }
 
   function fmtDegrees(nano) {
@@ -664,26 +723,47 @@
     } else {
       setUnknown("cal-result");
     }
+    renderMeasurements(data.measurements);
     calButtons(s.state);
+    if (s.id === 0) {
+      setCalToken("");
+    }
   }
 
-  function calPost(path, body) {
+  function calPost(path, body, options) {
+    var payload = body || {};
+    var token = calToken();
+    if (token && !(options && options.keepToken === false)) {
+      payload.token = parseInt(token, 10) || 0;
+    }
     return fetch(path, {
       method: "POST",
       cache: "no-store",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {})
+      headers: {
+        "Content-Type": "application/json",
+        "X-Mount-Command": "1"
+      },
+      body: JSON.stringify(payload)
     }).then(function (response) {
       return response.json().then(function (data) {
         return { ok: response.ok, status: response.status, data: data };
       });
     }).then(function (result) {
       if (!result.ok) {
-        calMessage("Отказ: " + (result.data && result.data.error ? result.data.error
-                                                                : result.status));
+        var reason = result.data && result.data.error ? result.data.error : result.status;
+        calMessage("Отказ: " + reason);
+        if (reason === "stale_session" || reason === "forbidden") {
+          pollCalibration();
+        }
         return;
       }
       calMessage("Готово.");
+      if (options && options.captureToken && result.data && result.data.token) {
+        setCalToken(result.data.token);
+        calMessage("Сессия " + result.data.session_id + " создана.");
+        pollCalibration();
+        return;
+      }
       renderCalibration(result.data);
     }).catch(function () {
       calMessage("Нет связи с устройством.");
@@ -740,7 +820,7 @@
         direction: byId("cal-direction").value,
         revolutions: parseInt(byId("cal-revolutions").value, 10) || 1,
         repeats: parseInt(byId("cal-repeats").value, 10) || 2
-      });
+      }, { captureToken: true, keepToken: false });
     });
     byId("cal-stop").addEventListener("click", function () {
       stopMoveRepeat();
@@ -752,28 +832,60 @@
     byId("cal-confirm-end").addEventListener("click", function () {
       calPost("/api/calibration/confirm-end", { session_id: calSessionId() });
     });
+    byId("cal-resume").addEventListener("click", function () {
+      calPost("/api/calibration/resume", { session_id: calSessionId() });
+    });
+    byId("cal-abandon").addEventListener("click", function () {
+      stopMoveRepeat();
+      calMoving = false;
+      calPost("/api/calibration/abandon", { session_id: calSessionId() });
+    });
     byId("cal-apply").addEventListener("click", function () {
       calPost("/api/calibration/apply", { session_id: calSessionId() });
+    });
+    byId("cal-repeat").addEventListener("click", function () {
+      calPost("/api/calibration/repeat", { session_id: calSessionId() });
+    });
+    byId("cal-delete").addEventListener("click", function () {
+      calPost("/api/calibration/measurements/delete", {
+        session_id: calSessionId(),
+        index: parseInt(byId("cal-index").value, 10) || 0
+      });
     });
     byId("cal-close").addEventListener("click", function () {
       calPost("/api/calibration/close", { session_id: calSessionId() });
     });
     byId("cal-reset").addEventListener("click", function () {
-      calPost("/api/calibration/reset", { axis: byId("cal-axis").value });
+      if (!window.confirm("Сбросить коэффициент к номиналу? Это необратимо.")) {
+        return;
+      }
+      calPost("/api/calibration/reset", {
+        axis: byId("cal-axis").value,
+        confirm: true
+      });
     });
+    // Отпускание кнопки — штатный останов для фиксации опорной точки.
+    var releaseMove = function () {
+      stopMoveRepeat();
+      if (calMoving) {
+        calMoving = false;
+        calPost("/api/calibration/stop", { session_id: calSessionId() });
+      }
+    };
     [["cal-move-forward", "forward"], ["cal-move-backward", "backward"]]
       .forEach(function (item) {
         var button = byId(item[0]);
         var start = function (event) {
           event.preventDefault();
           stopMoveRepeat();
+          calMoving = true;
           sendMove(item[1]);
           calMoveTimer = setInterval(function () { sendMove(item[1]); }, 150);
         };
         button.addEventListener("pointerdown", start);
-        button.addEventListener("pointerup", stopMoveRepeat);
-        button.addEventListener("pointerleave", stopMoveRepeat);
-        button.addEventListener("pointercancel", stopMoveRepeat);
+        button.addEventListener("pointerup", releaseMove);
+        button.addEventListener("pointerleave", releaseMove);
+        button.addEventListener("pointercancel", releaseMove);
       });
     calButtons("inactive");
     calMessage("Сессия не создана.");

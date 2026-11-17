@@ -2457,7 +2457,7 @@ bool flashWindowActive() const;
 | Управляющий слой | `components/control_hal/{include,src}/control_service.*` | `requestCalibrationStop`, `lastStopAttestation`, `begin/endCalibrationHold`, `setCalibrationInputReady`, `motionGeneration`, flash-окно, `require_neutral_after_calibration_` |
 | ESP-IDF адаптер | `components/calibration_hal/**` | `ControlPort`, `NvsStore` (два слота, CRC, sequence), `CalibrationService` (задача, сессия, удержание, сохранение) |
 | Веб-контракт | `components/web/include/web/{calibration_json,calibration_command}.hpp`, `src/*.cpp` | Статус-JSON и разбор плоских команд, покрыто host-тестами |
-| HTTP | `components/web_hal/src/http_status_service.cpp` | `GET /api/calibration` и 8 POST-маршрутов; `max_uri_handlers = 12` |
+| HTTP | `components/web_hal/src/http_status_service.cpp` | `GET /api/calibration` и 12 POST-маршрутов; `max_uri_handlers = 16`; токен владельца, заголовок действия, тип JSON |
 | Страница | `components/web_hal/www/index.html` | Вкладка калибровки: коэффициенты, сессия, движение с lease, подтверждения, применение, сброс |
 | Точка входа | `main/main.cpp`, `main/CMakeLists.txt` | `ControlService` стартует и без джойстика; `CalibrationService` статический; `web` получает ссылку на сервис |
 
@@ -2467,17 +2467,32 @@ bool flashWindowActive() const;
 - Сборка `idf.py build` **не выполнялась**: ESP-IDF в текущем окружении отсутствует. ESP-IDF-часть (`calibration_hal`, `web_hal`) не проверена компилятором и не запускалась на железе.
 - Стендовые проверки из 12.2 не выполнялись.
 
-### 20.3 Осознанные отклонения от редакции 3
+### 20.3 Отклонения после ревью реализации
 
-1. **Токен владельца сессии и `command_id`-дедупликация не реализованы в HTTP-слое.** Команды защищены `session_id`, проверкой состояния автомата и (для `move`) `motion_generation`; сервис также отбивает гонки мьютексом. Это меньше, чем контракт 9.2 (токен, история `CAL_COMMAND_HISTORY`, `command_expired`). Отклонение зафиксировано, а не замаскировано: без токена второй клиент с тем же `session_id` не отличим от первого.
-2. **Проверка `expected_revision` выполняется сервисом по текущему состоянию автомата, а не сравнением с номером ревизии из тела.** Номер возвращается в статусе и меняется на каждом переходе, но сравнение «ревизия из тела» пока не реализовано.
-3. **Ограничитель частоты `CAL_MAX_REQUESTS_PER_SEC`/`CAL_STOP_REQUESTS_PER_SEC`** объявлен в Kconfig, но в обработчиках не применён: ограничение сейчас только по размеру тела и таймаутам сокета.
-4. **`beginHold` подтверждается опросом** `calibrationHoldActive` (до 500 мс), а не событием. Это не нарушает правило «применяет задача», но добавляет задержку в `Preparing`.
-5. **`publishControl` не публикует `motion_generation` в хабе.** Веб-слой читает его через `CalibrationService`; блок `control` в `/api/state` не изменён.
+1. **История `command_id` и лимиты частоты не реализованы.** Повтор команды не дедуплицируется по `command_id`, `CAL_MAX_REQUESTS_PER_SEC`/`CAL_STOP_REQUESTS_PER_SEC` объявлены в Kconfig, но в обработчиках не применены. Ограничение сейчас: размер тела, таймауты сокета и требование заголовка действия.
+2. **`expected_revision` в теле команд не сравнивается.** Сервис проверяет состояние автомата, а номер ревизии только публикуется в статусе.
+3. **`beginHold` подтверждается опросом** `calibrationHoldActive` (до 500 мс), а не событием. Правило «применяет задача» не нарушено, но есть задержка в `Preparing`.
+4. **`publishControl` не публикует `motion_generation` в хабе.** Веб-слой читает его через `CalibrationService`; блок `control` в `/api/state` не изменён.
 
 ### 20.4 Что осталось до приёмки
 
 - Собрать `idf.py build`, устранить ошибки компиляции ESP-IDF-части.
 - Стендовый прогон 12.2: удержание, срыв lease, абсолютный дедлайн, отключение питания при сессии, запись NVS при открытом окне.
-- Внедрить токен сессии, `command_id`-историю и лимиты частоты (пункты 1–3 выше).
+- История `command_id` и лимиты частоты (пункт 1 выше).
 - Измерить бюджет flash/RAM: новый компонент и страница увеличивают образ.
+
+## 21. Журнал ревью реализации
+
+Ревью указало на ошибки связки «веб → сессия → движение». Ниже — что исправлено и чем закрыто.
+
+| # | Замечание | Исправление | Проверка |
+|---|---|---|---|
+| 1 | Направление `Backward` не доходило до мотора; API принимал отрицательную скорость | Добавлен `calibration::signedRate()`; сервис принимает только положительный модуль, знак формирует по направлению, `ControlPort` получает уже знаковую уставку | `test_calibration_math` (`signedRate`); сервис отклоняет `rate <= 0` |
+| 2 | Отпускание кнопки не завершало движение штатным остановом | `pointerup/leave/cancel` отправляют `stop`; истечение браузерного lease обрабатывается как потеря разрешения (`abandon()` в `Measuring`, затем останов); срок уставки не продлевается за дедлайн разрешения | `Session::abandon` покрыт в `test_calibration_session` |
+| 3 | Из `EndReady` можно было двигаться и подтвердить старую точку | `Session::noteMove` в `EndReady` аннулирует `current_end_` и переводит в `Measuring`; `confirmEnd` до нового останова невозможен | `test_calibration_session` (доводка из `EndReady`) |
+| 4 | Достоверность измерения не контролировалась на всём интервале | `CalibrationService::validateMeasurement` проверяет fault, `position_trusted`, эпоху и питание; при потере питания вызывает `holdLost()` и пытается восстановить удержание; `confirmStart/confirmEnd` перепроверяют снимок | проверки эпохи в `Session::confirmStop/confirmEnd` покрыты тестом |
+| 5 | Штатный калибровочный останов отзывал владельца | Добавлены `StopReason::Calibration` и отдельный `calibration_stop_requested_`: останов без `revoke_ownership` и без снятия permit; потерянное владение перехватывается в `Preparing` | `arming`/`control` изменения |
+| 6 | Не было изоляции управляющего клиента | При создании сессия выдаёт токен; все изменяющие команды требуют `token` (`CommandOutcome::Forbidden`); POST требует `X-Mount-Command: 1` и `Content-Type: application/json`; `reset` требует `confirm:true` | `test_calibration_command` |
+| 7 | Повтор сохранения после ошибки не работал | `Session::apply` разрешён из `Review`, `SaveFailed`, `SaveUncertain` | `test_calibration_session` (ошибка → повтор → `Applying`) |
+| 8 | Закрытие/отмена могли обойти освобождение ресурсов | `step()` обрабатывает терминальные состояния до проверки `active()`; `finishSessionLocked()` освобождает удержание и владение в `close`/`create`; повторный `beginHold` другой сессией сначала восстанавливает исходную политику | ESP-IDF слой, host-тестами не покрыто |
+| 9 | Частичный интерфейс | Добавлены `resume`, `abandon`, `measurements/delete`, `repeat`; статус и страница показывают список измерений; `apply` доступен после ошибки сохранения | `test_calibration_command`, страница |
