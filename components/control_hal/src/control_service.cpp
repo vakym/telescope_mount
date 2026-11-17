@@ -1000,7 +1000,8 @@ void ControlService::driveLoop(Micros now)
     const control::ArbitratedSetpoint setpoint = arbiter_.arbitrate(nowUs());
 
     control::ArmingInputs inputs{};
-    inputs.permit = permit_requested_.load() && !flash_window_active_.load();
+    inputs.permit = permit_requested_.load() && !flash_window_active_.load() &&
+                    !flash_window_requested_.load();
     inputs.neutral_confirmed =
         conversion_.ok && conversion_.neutral &&
         state::freshness(nowUs(), joystick_obs_.meta.measured_us,
@@ -1411,16 +1412,18 @@ void ControlService::cycle()
     applyCalibrationRequests(now);
 
     // Запрос окна записи NVS: движение запрещается до подтверждённого покоя.
+    // Пользовательский permit НЕ снимается: flash-окно только блокирует
+    // эффективное разрешение, поэтому после закрытия окна управление
+    // восстанавливается, если пользователь сам не вызвал disarm.
     if (flash_window_requested_.load() && !flash_window_active_.load()) {
-        permit_requested_.store(false);
         const state::SourceId previous = arbiter_.owner();
         if (previous != state::SourceId::None) {
             arbiter_.release(previous, now);
             arbiter_.cancelHandover();
-            if (previous == state::SourceId::Calibration) {
-                require_neutral_after_calibration_ = true;
-                calibration_released_us_ = now;
-            }
+            // После паузы владения возврат требует новой нейтрали: это
+            // защищает от немедленного движения после записи NVS.
+            require_neutral_after_calibration_ = true;
+            calibration_released_us_ = now;
         }
         safety_stop_requested_.store(true);
     }

@@ -653,18 +653,20 @@ CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint64_t to
     return CommandOutcome::Ok;
 }
 
-bool CalibrationService::persistNominal(motion::AxisId axis)
+int CalibrationService::persistNominal(motion::AxisId axis)
 {
     const std::uint32_t nominal =
         params_.nominal_half_steps_per_revolution[axisIndex(axis)];
     calibration::Record record = calibration::makeNominalRecord(nominal, store_.nextSequence());
     const esp_err_t error = store_.save(axis, record);
     if (error != ESP_OK) {
-        return false;
+        return 0;
     }
     const NvsStore::Loaded loaded = store_.load(axis);
-    return loaded.present && loaded.record.sequence == record.sequence &&
-           loaded.record.nanodegrees_per_half_step == record.nanodegrees_per_half_step;
+    const bool verified =
+        loaded.present && loaded.record.sequence == record.sequence &&
+        loaded.record.nanodegrees_per_half_step == record.nanodegrees_per_half_step;
+    return verified ? 2 : 1;
 }
 
 CommandOutcome CalibrationService::resetAxis(motion::AxisId axis, bool confirmed)
@@ -687,11 +689,21 @@ CommandOutcome CalibrationService::resetAxis(motion::AxisId axis, bool confirmed
         unlock();
         return CommandOutcome::InvalidState;
     }
-    const bool ok = persistNominal(axis);
+    const int result = persistNominal(axis);
     port_.endFlashWindow();
-    refreshScale(axis);
+    if (result == 2) {
+        refreshScale(axis);
+        unlock();
+        return CommandOutcome::Ok;
+    }
+    // Запись не подтверждена: действующий коэффициент в RAM НЕ меняется,
+    // меняется только наблюдаемое состояние хранения.
+    const std::size_t index = axisIndex(axis);
+    scales_[index].scale.persistence = result == 1
+                                           ? calibration::Persistence::Unconfirmed
+                                           : calibration::Persistence::Failed;
     unlock();
-    return ok ? CommandOutcome::Ok : CommandOutcome::InvalidState;
+    return CommandOutcome::InvalidState;
 }
 
 void CalibrationService::refreshReadiness(calibration::Micros now)
@@ -801,11 +813,17 @@ void CalibrationService::revokeBrowserMotion(calibration::Micros now)
     }
 }
 
+bool CalibrationService::movePermissionActive(calibration::Micros now) const noexcept
+{
+    return calibration::movePermissionValid(move_active_, now, move_until_us_,
+                                            kMinMoveLeaseUs);
+}
+
 bool CalibrationService::handleMoveLease(calibration::Micros now)
 {
-    // Разрешение действует, только пока остаток не меньше минимального
-    // срока уставки: иначе короткий lease мог бы уничтожить владение.
-    if (!move_active_ || now + kMinMoveLeaseUs <= move_until_us_) {
+    // Единственная граница: остаток должен быть строго больше порога.
+    // Иначе разрешение отозвано — с аннулированием измерения и остановом.
+    if (!move_active_ || movePermissionActive(now)) {
         return false;
     }
     revokeBrowserMotion(now);
@@ -814,10 +832,9 @@ bool CalibrationService::handleMoveLease(calibration::Micros now)
 
 float CalibrationService::permittedOutputRate(calibration::Micros now) const noexcept
 {
-    if (!move_active_ || move_until_us_ <= now + kMinMoveLeaseUs) {
-        return 0.0F;
-    }
-    return calibration::signedRate(move_direction_, move_rate_);
+    return movePermissionActive(now)
+               ? calibration::signedRate(move_direction_, move_rate_)
+               : 0.0F;
 }
 
 void CalibrationService::stepActive(calibration::Micros now,
@@ -889,8 +906,13 @@ void CalibrationService::stepPreparing(calibration::Micros now,
 void CalibrationService::driveMove(calibration::Micros now,
                                    const calibration::Snapshot &snapshot)
 {
-    if (!move_active_ || now > move_until_us_) {
-        return;  // дедлайн уже обработан в handleMoveLease()
+    if (!move_active_) {
+        return;
+    }
+    if (!movePermissionActive(now)) {
+        // Дедлайн уже обработан в handleMoveLease(); это защита от гонки.
+        revokeBrowserMotion(now);
+        return;
     }
     const calibration::SessionState state = session_.state();
     if (state != calibration::SessionState::InitialPositioning &&
@@ -918,11 +940,6 @@ void CalibrationService::driveMove(calibration::Micros now,
         return;
     }
     const calibration::Micros remaining = move_until_us_ - now;
-    if (remaining < kMinMoveLeaseUs) {
-        // Слишком короткий остаток не публикуем: разрешение отозвано.
-        revokeBrowserMotion(now);
-        return;
-    }
     calibration::Micros lease_us =
         static_cast<calibration::Micros>(CONFIG_CAL_MOVE_LEASE_MS) * 1000ULL;
     if (remaining < lease_us) {

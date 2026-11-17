@@ -51,6 +51,11 @@ double nominalDegreesPerHalfStep(std::uint32_t half_steps_per_revolution) noexce
 /// Направление — единственный источник знака: клиент передаёт модуль.
 float signedRate(motion::Direction direction, float magnitude) noexcept;
 
+/// Действует ли ненулевое браузерное разрешение: остаток строго больше
+/// минимального срока уставки. Единственное определение границы.
+bool movePermissionValid(bool move_active, Micros now, Micros until,
+                         Micros min_lease) noexcept;
+
 /// Перевод коэффициента в наноградусы на полушаг с округлением.
 std::int64_t toNanodegrees(double degrees_per_half_step) noexcept;
 

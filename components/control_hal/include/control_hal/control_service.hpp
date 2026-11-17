@@ -246,6 +246,8 @@ private:
 
     StaticSemaphore_t api_mutex_storage_{};
     SemaphoreHandle_t api_mutex_ = nullptr;
+    /// Порядок захвата: cal_mutex_ -> моторный API-мьютекс (через порт).
+    /// Моторный слой никогда не берёт cal_mutex_: обратной зависимости нет.
     StaticSemaphore_t cal_mutex_storage_{};
     SemaphoreHandle_t cal_mutex_ = nullptr;
     StaticSemaphore_t recovery_mutex_storage_{};

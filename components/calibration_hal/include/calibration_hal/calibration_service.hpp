@@ -134,10 +134,13 @@ private:
     /// текущего измерения и останов, если сессия ещё подвижна.
     void revokeBrowserMotion(calibration::Micros now);
     bool handleMoveLease(calibration::Micros now);
+    /// Единственное определение действующего разрешения.
+    bool movePermissionActive(calibration::Micros now) const noexcept;
     float permittedOutputRate(calibration::Micros now) const noexcept;
     /// 0 — ошибка записи, 1 — результат неизвестен, 2 — проверено.
     int persist(const calibration::CombinedResult &result);
-    bool persistNominal(motion::AxisId axis);
+    /// 0 — ошибка записи, 1 — результат не подтверждён, 2 — проверено.
+    int persistNominal(motion::AxisId axis);
     void refreshScale(motion::AxisId axis);
     void failSession(calibration::SessionError error);
     calibration::CalibrationParams makeParams() const;

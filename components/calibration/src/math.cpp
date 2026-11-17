@@ -214,4 +214,13 @@ float signedRate(motion::Direction direction, float magnitude) noexcept
     return direction == motion::Direction::Forward ? absolute : -absolute;
 }
 
+bool movePermissionValid(bool move_active, Micros now, Micros until,
+                         Micros min_lease) noexcept
+{
+    if (!move_active || until <= now) {
+        return false;
+    }
+    return (until - now) > min_lease;
+}
+
 }  // namespace calibration

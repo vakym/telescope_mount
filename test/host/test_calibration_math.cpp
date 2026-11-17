@@ -74,6 +74,17 @@ int main()
     CHECK_NEAR(nominalDegreesPerHalfStep(4096), 360.0 / 4096.0, 1e-12);
     CHECK(toNanodegrees(360.0 / 4096.0) == 87890625);
 
+    // Единственная граница браузерного разрешения: остаток строго больше
+    // порога. Проверяются 50 001, 50 000 и 49 999 мкс.
+    enum : state::Micros { kMinLease = 50'000 };
+    const state::Micros deadline = 1'000'000;
+    CHECK(movePermissionValid(true, deadline - 50'001, deadline, kMinLease));
+    CHECK(!movePermissionValid(true, deadline - 50'000, deadline, kMinLease));
+    CHECK(!movePermissionValid(true, deadline - 49'999, deadline, kMinLease));
+    CHECK(!movePermissionValid(false, deadline - 100'000, deadline, kMinLease));
+    CHECK(!movePermissionValid(true, deadline, deadline, kMinLease));
+    CHECK(!movePermissionValid(true, deadline + 1, deadline, kMinLease));
+
     // Знак исполнительной уставки задаёт только направление.
     CHECK_NEAR(signedRate(motion::Direction::Forward, 120.0F), 120.0, 1e-6);
     CHECK_NEAR(signedRate(motion::Direction::Backward, 120.0F), -120.0, 1e-6);
