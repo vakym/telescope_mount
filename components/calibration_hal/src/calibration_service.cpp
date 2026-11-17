@@ -134,34 +134,43 @@ void CalibrationService::run()
     vTaskDelete(nullptr);
 }
 
-void CalibrationService::refreshScale(motion::AxisId axis)
+void CalibrationService::publishScale(motion::AxisId axis, const calibration::Record &record)
 {
     const std::size_t index = axisIndex(axis);
     AxisScaleStatus status{};
     status.nominal_half_steps_per_revolution =
         params_.nominal_half_steps_per_revolution[index];
+    status.scale.nanodegrees_per_half_step = record.nanodegrees_per_half_step;
+    status.scale.saved = record.userCalibrated();
+    status.scale.source = record.userCalibrated()
+                              ? calibration::AxisScaleSource::User
+                              : calibration::AxisScaleSource::SavedNominal;
+    status.scale.persistence = calibration::Persistence::Verified;
+    status.scale.sample_count = record.sample_count;
+    status.scale.total_revolutions = record.total_revolutions;
+    status.scale.spread_ppm = record.spread_ppm;
+    scales_[index] = status;
+}
+
+void CalibrationService::refreshScale(motion::AxisId axis)
+{
+    const std::size_t index = axisIndex(axis);
     const NvsStore::Loaded loaded = store_.load(axis);
     if (loaded.present) {
-        const calibration::Record &record = loaded.record;
-        status.scale.nanodegrees_per_half_step = record.nanodegrees_per_half_step;
-        status.scale.saved = record.userCalibrated();
-        status.scale.source = record.userCalibrated()
-                                  ? calibration::AxisScaleSource::User
-                                  : calibration::AxisScaleSource::SavedNominal;
-        status.scale.persistence = calibration::Persistence::Verified;
-        status.scale.sample_count = record.sample_count;
-        status.scale.total_revolutions = record.total_revolutions;
-        status.scale.spread_ppm = record.spread_ppm;
-    } else {
-        status.scale.nanodegrees_per_half_step = calibration::toNanodegrees(
-            calibration::nominalDegreesPerHalfStep(
-                status.nominal_half_steps_per_revolution));
-        status.scale.source = calibration::AxisScaleSource::ConfigNominal;
-        status.scale.saved = false;
-        status.scale.persistence = loaded.error == ESP_OK
-                                       ? calibration::Persistence::Absent
-                                       : calibration::Persistence::Failed;
+        publishScale(axis, loaded.record);
+        return;
     }
+    AxisScaleStatus status{};
+    status.nominal_half_steps_per_revolution =
+        params_.nominal_half_steps_per_revolution[index];
+    status.scale.nanodegrees_per_half_step = calibration::toNanodegrees(
+        calibration::nominalDegreesPerHalfStep(
+            status.nominal_half_steps_per_revolution));
+    status.scale.source = calibration::AxisScaleSource::ConfigNominal;
+    status.scale.saved = false;
+    status.scale.persistence = loaded.error == ESP_OK
+                                   ? calibration::Persistence::Absent
+                                   : calibration::Persistence::Failed;
     scales_[index] = status;
 }
 
@@ -588,8 +597,10 @@ CommandOutcome CalibrationService::addRepeat(std::uint32_t session, std::uint64_
     return CommandOutcome::Ok;
 }
 
-int CalibrationService::persist(const calibration::CombinedResult &result)
+int CalibrationService::persist(const calibration::CombinedResult &result,
+                                calibration::Record &verified_record)
 {
+    verified_record = calibration::Record{};
     if (!port_.beginFlashWindow(kFlashWindowTimeoutUs)) {
         return 0;
     }
@@ -604,6 +615,10 @@ int CalibrationService::persist(const calibration::CombinedResult &result)
                    loaded.record.userCalibrated() &&
                    loaded.record.nanodegrees_per_half_step ==
                        record.nanodegrees_per_half_step;
+        if (verified) {
+            // Публикуется именно запись, с которой совпал readback.
+            verified_record = loaded.record;
+        }
     }
     port_.endFlashWindow();
     if (error != ESP_OK) {
@@ -639,10 +654,12 @@ CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint64_t to
     }
     session_.beginSaving();
     const calibration::CombinedResult result = session_.result();
-    const int persist_result = persist(result);
+    calibration::Record verified_record{};
+    const int persist_result = persist(result, verified_record);
     if (persist_result == 2) {
         session_.saveVerified(result);
-        refreshScale(session_.config().axis);
+        // Без повторного чтения NVS: публикуется уже проверенная запись.
+        publishScale(session_.config().axis, verified_record);
     } else if (persist_result == 1) {
         session_.saveUncertain();
     } else {
@@ -653,8 +670,10 @@ CommandOutcome CalibrationService::apply(std::uint32_t session, std::uint64_t to
     return CommandOutcome::Ok;
 }
 
-int CalibrationService::persistNominal(motion::AxisId axis)
+int CalibrationService::persistNominal(motion::AxisId axis,
+                                       calibration::Record &verified_record)
 {
+    verified_record = calibration::Record{};
     const std::uint32_t nominal =
         params_.nominal_half_steps_per_revolution[axisIndex(axis)];
     calibration::Record record = calibration::makeNominalRecord(nominal, store_.nextSequence());
@@ -666,6 +685,9 @@ int CalibrationService::persistNominal(motion::AxisId axis)
     const bool verified =
         loaded.present && loaded.record.sequence == record.sequence &&
         loaded.record.nanodegrees_per_half_step == record.nanodegrees_per_half_step;
+    if (verified) {
+        verified_record = loaded.record;
+    }
     return verified ? 2 : 1;
 }
 
@@ -689,10 +711,11 @@ CommandOutcome CalibrationService::resetAxis(motion::AxisId axis, bool confirmed
         unlock();
         return CommandOutcome::InvalidState;
     }
-    const int result = persistNominal(axis);
+    calibration::Record verified_record{};
+    const int result = persistNominal(axis, verified_record);
     port_.endFlashWindow();
     if (result == 2) {
-        refreshScale(axis);
+        publishScale(axis, verified_record);
         unlock();
         return CommandOutcome::Ok;
     }

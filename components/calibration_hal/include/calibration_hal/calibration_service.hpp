@@ -138,10 +138,15 @@ private:
     bool movePermissionActive(calibration::Micros now) const noexcept;
     float permittedOutputRate(calibration::Micros now) const noexcept;
     /// 0 — ошибка записи, 1 — результат неизвестен, 2 — проверено.
-    int persist(const calibration::CombinedResult &result);
+    /// При 2 в verified_record — запись, с которой совпал readback.
+    int persist(const calibration::CombinedResult &result,
+                calibration::Record &verified_record);
     /// 0 — ошибка записи, 1 — результат не подтверждён, 2 — проверено.
-    int persistNominal(motion::AxisId axis);
+    /// При 2 в verified_record — запись, с которой совпал readback.
+    int persistNominal(motion::AxisId axis, calibration::Record &verified_record);
     void refreshScale(motion::AxisId axis);
+    /// Публикует уже проверенную запись без повторного чтения NVS.
+    void publishScale(motion::AxisId axis, const calibration::Record &record);
     void failSession(calibration::SessionError error);
     calibration::CalibrationParams makeParams() const;
     bool requestStopInternal(calibration::Micros now);
